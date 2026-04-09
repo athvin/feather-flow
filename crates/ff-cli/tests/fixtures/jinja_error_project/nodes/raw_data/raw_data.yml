@@ -1,0 +1,17 @@
+kind: sources
+version: 1
+
+name: raw_data
+description: "Raw data source"
+schema: main
+
+tables:
+  - name: raw_events
+    description: "Raw events"
+    columns:
+      - name: id
+        description: "Unique identifier for the record"
+        type: INTEGER
+      - name: status
+        description: "Current status of the record"
+        type: VARCHAR

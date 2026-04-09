@@ -1,0 +1,11 @@
+kind: sql
+version: 1
+name: stg_customers
+description: "Staged customers from raw source"
+columns:
+  - name: id
+    description: "Unique identifier for the record"
+    type: INTEGER
+  - name: name
+    description: "Name of the entity"
+    type: VARCHAR

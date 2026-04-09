@@ -1,0 +1,8 @@
+kind: sql
+version: 1
+name: source_a
+description: "Source A"
+columns:
+  - name: id
+    description: "Unique identifier for the record"
+    data_type: INTEGER

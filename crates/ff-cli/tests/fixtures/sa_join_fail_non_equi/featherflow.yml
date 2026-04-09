@@ -1,0 +1,9 @@
+name: sa_join_fail_non_equi
+version: 1.0.0
+materialization: view
+dialect: duckdb
+database:
+  default:
+    type: duckdb
+    path: target/dev.duckdb
+    schema: analytics

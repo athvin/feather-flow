@@ -1,0 +1,27 @@
+[package]
+name = "ff-analysis"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+test-support = []
+
+[dependencies]
+ff-core = { path = "../ff-core" }
+ff-sql = { path = "../ff-sql" }
+
+log.workspace = true
+thiserror.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_yaml.workspace = true
+sqlparser.workspace = true
+
+# DataFusion static analysis
+datafusion-common.workspace = true
+datafusion-expr.workspace = true
+datafusion-sql.workspace = true
+arrow.workspace = true
+
+[dev-dependencies]
+ff-analysis = { path = ".", features = ["test-support"] }

@@ -1,0 +1,21 @@
+[package]
+name = "ff-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Core library for Featherflow - shared types, config, and DAG logic"
+
+[dependencies]
+log.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
+petgraph.workspace = true
+sha2 = "0.10"
+chrono.workspace = true
+uuid = { version = "1.6", features = ["v4"] }
+
+[dev-dependencies]
+tempfile = "3.10"
+serial_test = "3.0"

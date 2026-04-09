@@ -1,0 +1,11 @@
+kind: sql
+version: 1
+name: fn_date
+description: "Date function stubs: date_trunc and date_part"
+columns:
+  - name: trunc_ts
+    description: "The trunc ts value"
+    data_type: TIMESTAMP
+  - name: yr
+    description: "The yr value"
+    data_type: BIGINT

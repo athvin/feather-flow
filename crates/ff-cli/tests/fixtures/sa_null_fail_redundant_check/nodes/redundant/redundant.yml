@@ -1,0 +1,8 @@
+kind: sql
+version: 1
+name: redundant
+description: "IS NOT NULL on NOT NULL column — should trigger A012"
+columns:
+  - name: id
+    description: "Unique identifier for the record"
+    data_type: INTEGER

@@ -1,0 +1,8 @@
+kind: sql
+version: 1
+name: with_agg
+description: "Aggregate count from raw_data"
+columns:
+  - name: cnt
+    description: "Count of occurrences"
+    data_type: BIGINT

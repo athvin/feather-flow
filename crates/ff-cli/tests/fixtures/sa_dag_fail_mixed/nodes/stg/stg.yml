@@ -1,0 +1,14 @@
+kind: sql
+version: 1
+name: stg
+description: "Staging model with missing column in YAML"
+columns:
+  - name: id
+    description: "Unique identifier for the record"
+    type: INTEGER
+  - name: name
+    description: "Name of the entity"
+    type: VARCHAR
+  - name: amount
+    description: "Monetary amount in dollars"
+    type: "DECIMAL(10,2)"

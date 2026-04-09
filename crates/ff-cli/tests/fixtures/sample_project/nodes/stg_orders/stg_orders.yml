@@ -1,0 +1,54 @@
+version: 1
+kind: sql
+materialized: view
+schema: staging
+
+description: "Staged orders from raw source"
+owner: data-team
+tags:
+  - staging
+  - orders
+
+columns:
+  - name: order_id
+    type: INTEGER
+    description: "Unique identifier for the order"
+    classification: internal
+    primary_key: true
+    tests:
+      - unique
+      - not_null
+
+  - name: customer_id
+    type: INTEGER
+    description: "Foreign key to stg_customers"
+    classification: pii
+    tests:
+      - not_null
+    references:
+      model: stg_customers
+      column: customer_id
+
+  - name: order_date
+    type: DATE
+    description: "Date the order was placed"
+    classification: internal
+    tests:
+      - not_null
+
+  - name: amount
+    type: DECIMAL(10,2)
+    description: "Order total in USD"
+    classification: sensitive
+    tests:
+      - not_null
+      - positive
+
+  - name: status
+    type: VARCHAR
+    description: "Order status"
+    classification: internal
+    tests:
+      - not_null
+      - accepted_values:
+          values: [pending, completed, cancelled]

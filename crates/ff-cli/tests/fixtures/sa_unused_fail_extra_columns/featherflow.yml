@@ -1,0 +1,9 @@
+name: sa_unused_fail_extra_columns
+version: 1.0.0
+materialization: view
+dialect: duckdb
+database:
+  default:
+    type: duckdb
+    path: target/dev.duckdb
+    schema: analytics

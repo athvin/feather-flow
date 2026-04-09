@@ -1,0 +1,16 @@
+name: jinja_template_project
+version: 1.0.0
+materialization: view
+dialect: duckdb
+database:
+  default:
+    type: duckdb
+    path: target/dev.duckdb
+    schema: analytics
+vars:
+  min_event_count: 10
+  event_category: page_view
+  enable_filtering: true
+  tier: gold
+query_comment:
+  enabled: false

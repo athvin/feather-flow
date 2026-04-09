@@ -1,0 +1,460 @@
+//! Model representation
+
+pub mod schema;
+pub mod testing;
+
+pub use schema::{
+    ColumnReference, DataClassification, ModelKind, ModelSchema, PythonConfig, SchemaColumnDef,
+    StringOrVec,
+};
+pub use testing::{
+    parse_test_definition, SchemaTest, SingularTest, TestConfig, TestDefinition, TestParams,
+    TestSeverity, TestType,
+};
+
+use crate::config::{IncrementalStrategy, Materialization, OnSchemaChange};
+use crate::error::CoreError;
+use crate::model_name::ModelName;
+use crate::table_name::TableName;
+use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
+
+/// Represents a model in the project (SQL or Python)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Model {
+    /// Model name (derived from filename without extension)
+    pub name: ModelName,
+
+    /// Path to the source file (.sql or .py)
+    pub path: PathBuf,
+
+    /// Raw source content (SQL before Jinja rendering, or Python script source)
+    pub raw_sql: String,
+
+    /// Compiled SQL content (after Jinja rendering). Not used for Python models.
+    #[serde(default)]
+    pub compiled_sql: Option<String>,
+
+    /// Model configuration from config() function
+    #[serde(default)]
+    pub config: ModelConfig,
+
+    /// Dependencies on other models
+    #[serde(default)]
+    pub depends_on: HashSet<ModelName>,
+
+    /// Dependencies on external tables
+    #[serde(default)]
+    pub external_deps: HashSet<TableName>,
+
+    /// Schema metadata from 1:1 .yml file (optional)
+    #[serde(default)]
+    pub schema: Option<ModelSchema>,
+
+    /// Base name without version suffix (e.g., "fct_orders" for "fct_orders_v2")
+    #[serde(default)]
+    pub base_name: Option<String>,
+
+    /// Version number if model follows _v{N} naming convention (e.g., 2 for "fct_orders_v2")
+    #[serde(default)]
+    pub version: Option<u32>,
+
+    /// The kind of model: SQL (default) or Python
+    #[serde(default)]
+    pub kind: ModelKind,
+}
+
+/// Configuration for a model extracted from config() function
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ModelConfig {
+    /// Materialization type (view, table, or incremental)
+    #[serde(default)]
+    pub materialized: Option<Materialization>,
+
+    /// Target schema
+    #[serde(default)]
+    pub schema: Option<String>,
+
+    /// Additional tags
+    #[serde(default)]
+    pub tags: Vec<String>,
+
+    /// Unique key column(s) for incremental merge
+    /// Can be a single column name or comma-separated list
+    #[serde(default)]
+    pub unique_key: Option<String>,
+
+    /// Incremental strategy (append, merge, delete+insert)
+    #[serde(default)]
+    pub incremental_strategy: Option<IncrementalStrategy>,
+
+    /// Schema change handling for incremental models
+    #[serde(default)]
+    pub on_schema_change: Option<OnSchemaChange>,
+
+    /// SQL statements to execute before the model runs
+    #[serde(default)]
+    pub pre_hook: Vec<String>,
+
+    /// SQL statements to execute after the model runs
+    #[serde(default)]
+    pub post_hook: Vec<String>,
+
+    /// Whether this model uses Write-Audit-Publish pattern
+    #[serde(default)]
+    pub wap: Option<bool>,
+
+    /// Arbitrary key-value metadata from the config() function
+    #[serde(default)]
+    pub meta: HashMap<String, String>,
+}
+
+impl Model {
+    /// Create a new model from a file path
+    ///
+    /// This also looks for a matching 1:1 schema file (same name with .yml or .yaml extension).
+    /// Every model must have a corresponding YAML schema file — returns an error if missing.
+    /// Config fields (materialized, schema, hooks, etc.) are read from the YAML file.
+    pub fn from_file(path: PathBuf) -> Result<Self, crate::error::CoreError> {
+        let name = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .ok_or_else(|| crate::error::CoreError::ModelParseError {
+                name: path.display().to_string(),
+                message: "Cannot extract model name from path".to_string(),
+            })?
+            .to_string();
+
+        let raw_sql = std::fs::read_to_string(&path).map_err(|e| CoreError::IoWithPath {
+            path: path.display().to_string(),
+            source: e,
+        })?;
+
+        if raw_sql.trim().is_empty() {
+            return Err(CoreError::ModelParseError {
+                name,
+                message: "SQL file is empty".into(),
+            });
+        }
+
+        let schema = match crate::project::find_yaml_path(&path) {
+            Some(p) => Some(ModelSchema::load(&p)?),
+            None => {
+                return Err(crate::error::CoreError::MissingSchemaFile {
+                    model: name,
+                    expected_path: path.with_extension("yml").display().to_string(),
+                });
+            }
+        };
+
+        let config = Self::config_from_schema(schema.as_ref());
+        let (base_name, version) = Self::parse_version(&name);
+
+        Ok(Self {
+            name: ModelName::new(name),
+            path,
+            raw_sql,
+            compiled_sql: None,
+            config,
+            depends_on: HashSet::new(),
+            external_deps: HashSet::new(),
+            schema,
+            base_name,
+            version,
+            kind: ModelKind::Model,
+        })
+    }
+
+    /// Create a new Python model from a `.py` file path
+    ///
+    /// Like `from_file`, this requires a matching 1:1 schema file with `kind: python`.
+    /// Dependencies are read from the schema file's `depends_on` field rather than
+    /// SQL AST parsing.
+    pub fn from_python_file(
+        path: PathBuf,
+        schema: ModelSchema,
+    ) -> Result<Self, crate::error::CoreError> {
+        let name = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .ok_or_else(|| crate::error::CoreError::ModelParseError {
+                name: path.display().to_string(),
+                message: "Cannot extract model name from path".to_string(),
+            })?
+            .to_string();
+
+        let raw_source = std::fs::read_to_string(&path).map_err(|e| CoreError::IoWithPath {
+            path: path.display().to_string(),
+            source: e,
+        })?;
+
+        if raw_source.trim().is_empty() {
+            return Err(CoreError::ModelParseError {
+                name,
+                message: "Python file is empty".into(),
+            });
+        }
+
+        let depends_on: HashSet<ModelName> = schema
+            .depends_on
+            .iter()
+            .filter_map(|s| ModelName::try_new(s.clone()))
+            .collect();
+
+        let (base_name, version) = Self::parse_version(&name);
+
+        Ok(Self {
+            name: ModelName::new(name),
+            path,
+            raw_sql: raw_source,
+            compiled_sql: None,
+            config: ModelConfig {
+                // Python models always materialize as tables
+                materialized: Some(Materialization::Table),
+                schema: schema.schema.clone(),
+                tags: schema.tags.clone(),
+                ..ModelConfig::default()
+            },
+            depends_on,
+            external_deps: HashSet::new(),
+            schema: Some(schema),
+            base_name,
+            version,
+            kind: ModelKind::Python,
+        })
+    }
+
+    /// Create a new model from a file path, using already-read YAML schema content.
+    ///
+    /// Avoids re-reading and re-parsing the YAML file when the caller has already
+    /// read the content (e.g., during node discovery).
+    pub fn from_file_with_schema_content(
+        path: PathBuf,
+        schema_content: &str,
+        schema_path: &std::path::Path,
+    ) -> Result<Self, crate::error::CoreError> {
+        let name = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .ok_or_else(|| crate::error::CoreError::ModelParseError {
+                name: path.display().to_string(),
+                message: "Cannot extract model name from path".to_string(),
+            })?
+            .to_string();
+
+        let raw_sql = std::fs::read_to_string(&path).map_err(|e| CoreError::IoWithPath {
+            path: path.display().to_string(),
+            source: e,
+        })?;
+
+        if raw_sql.trim().is_empty() {
+            return Err(CoreError::ModelParseError {
+                name,
+                message: "SQL file is empty".into(),
+            });
+        }
+
+        let schema = Some(ModelSchema::load_from_str(schema_content, schema_path)?);
+        let config = Self::config_from_schema(schema.as_ref());
+
+        let (base_name, version) = Self::parse_version(&name);
+
+        Ok(Self {
+            name: ModelName::new(name),
+            path,
+            raw_sql,
+            compiled_sql: None,
+            config,
+            depends_on: HashSet::new(),
+            external_deps: HashSet::new(),
+            schema,
+            base_name,
+            version,
+            kind: ModelKind::Model,
+        })
+    }
+
+    /// Build a `ModelConfig` from the YAML schema fields.
+    ///
+    /// Config is read exclusively from YAML — the SQL `{{ config() }}` function
+    /// is no longer supported.
+    fn config_from_schema(schema: Option<&ModelSchema>) -> ModelConfig {
+        let Some(schema) = schema else {
+            return ModelConfig::default();
+        };
+        ModelConfig {
+            materialized: schema.materialized.as_deref().map(Materialization::parse),
+            schema: schema.schema.clone(),
+            tags: schema.tags.clone(),
+            unique_key: schema.unique_key.as_ref().map(|u| u.to_comma_string()),
+            incremental_strategy: schema
+                .incremental_strategy
+                .as_deref()
+                .map(IncrementalStrategy::parse),
+            on_schema_change: schema
+                .on_schema_change
+                .as_deref()
+                .map(OnSchemaChange::parse),
+            pre_hook: schema
+                .pre_hook
+                .as_ref()
+                .map(|h| h.to_vec_raw())
+                .unwrap_or_default(),
+            post_hook: schema
+                .post_hook
+                .as_ref()
+                .map(|h| h.to_vec_raw())
+                .unwrap_or_default(),
+            wap: schema.wap,
+            meta: HashMap::new(),
+        }
+    }
+
+    /// Parse version suffix from model name
+    ///
+    /// Returns (base_name, version) where base_name is Some if the model follows _v{N} convention
+    /// Examples:
+    /// - "fct_orders_v2" -> (Some("fct_orders"), Some(2))
+    /// - "fct_orders_v10" -> (Some("fct_orders"), Some(10))
+    /// - "fct_orders" -> (None, None)
+    /// - "v2_model" -> (None, None) // v must be suffix, not prefix
+    pub fn parse_version(name: &str) -> (Option<String>, Option<u32>) {
+        if let Some(idx) = name.rfind("_v") {
+            let suffix = &name[idx + 2..];
+            if let Ok(version) = suffix.parse::<u32>() {
+                let base_name = name[..idx].to_string();
+                return (Some(base_name), Some(version));
+            }
+        }
+        (None, None)
+    }
+
+    /// Get the base name for this model (name without version suffix)
+    pub fn get_base_name(&self) -> &str {
+        self.base_name.as_deref().unwrap_or(&self.name)
+    }
+
+    /// Check if this model is a versioned model (has _v{N} suffix)
+    pub fn is_versioned(&self) -> bool {
+        self.version.is_some()
+    }
+
+    /// Get the version number if this is a versioned model
+    pub fn get_version(&self) -> Option<u32> {
+        self.version
+    }
+
+    /// Check if this model is deprecated
+    pub fn is_deprecated(&self) -> bool {
+        self.schema.as_ref().map(|s| s.deprecated).unwrap_or(false)
+    }
+
+    /// Get the deprecation message if this model is deprecated
+    pub fn get_deprecation_message(&self) -> Option<&str> {
+        self.schema
+            .as_ref()
+            .and_then(|s| s.deprecation_message.as_deref())
+    }
+
+    /// Get the materialization for this model, falling back through the precedence chain:
+    /// 1. SQL config() function (self.config.materialized)
+    /// 2. Project default
+    pub fn materialization(&self, default: Materialization) -> Materialization {
+        self.config.materialized.unwrap_or(default)
+    }
+
+    /// Get the schema for this model, falling back through the precedence chain:
+    /// 1. SQL config() function (self.config.schema)
+    /// 2. Project default
+    pub fn target_schema<'a>(&'a self, default: Option<&'a str>) -> Option<&'a str> {
+        self.config.schema.as_deref().or(default)
+    }
+
+    /// Check if WAP is enabled for this model
+    ///
+    /// Follows the precedence chain:
+    /// 1. SQL config() function (self.config.wap)
+    /// 2. Default: false
+    pub fn wap_enabled(&self) -> bool {
+        self.config.wap.unwrap_or(false)
+    }
+
+    /// Get all dependencies (both model and external) as plain strings.
+    ///
+    /// Note: this erases the distinction between `ModelName` and `TableName`,
+    /// returning both as `String`. Callers that need to distinguish between
+    /// model dependencies and external table dependencies should use
+    /// `depends_on` and `external_deps` fields directly.
+    pub fn all_dependencies(&self) -> HashSet<String> {
+        let mut deps: HashSet<String> = self.depends_on.iter().map(|m| m.to_string()).collect();
+        deps.extend(self.external_deps.iter().map(|t| t.to_string()));
+        deps
+    }
+
+    /// Get tests from the model's 1:1 schema file
+    pub fn get_schema_tests(&self) -> Vec<SchemaTest> {
+        match &self.schema {
+            Some(schema) => schema.extract_tests(&self.name),
+            None => Vec::new(),
+        }
+    }
+
+    /// Check if this model is configured for incremental materialization
+    pub fn is_incremental_model(&self, default: Materialization) -> bool {
+        self.materialization(default) == Materialization::Incremental
+    }
+
+    /// Get the incremental strategy for this model
+    pub fn incremental_strategy(&self) -> IncrementalStrategy {
+        self.config
+            .incremental_strategy
+            .unwrap_or(IncrementalStrategy::Append)
+    }
+
+    /// Get the unique key(s) for incremental merge
+    pub fn unique_key(&self) -> Option<Vec<String>> {
+        self.config.unique_key.as_ref().map(|k| {
+            k.split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect()
+        })
+    }
+
+    /// Get the on_schema_change behavior
+    pub fn on_schema_change(&self) -> OnSchemaChange {
+        self.config
+            .on_schema_change
+            .unwrap_or(OnSchemaChange::Ignore)
+    }
+
+    /// Check if this is a Python model (executed via `uv run`)
+    pub fn is_python(&self) -> bool {
+        self.kind == ModelKind::Python
+    }
+
+    /// Compute a SHA-256 checksum of the raw source content (SQL or Python).
+    pub fn sql_checksum(&self) -> String {
+        crate::compute_checksum(&self.raw_sql)
+    }
+
+    /// Get the owner for this model from schema metadata
+    pub fn get_owner(&self) -> Option<String> {
+        self.schema.as_ref().and_then(|s| s.get_owner())
+    }
+
+    /// Get a metadata value from the model's schema
+    pub fn get_meta(&self, key: &str) -> Option<&serde_yaml::Value> {
+        self.schema.as_ref().and_then(|s| s.get_meta(key))
+    }
+
+    /// Get a metadata value as a string
+    pub fn get_meta_string(&self, key: &str) -> Option<String> {
+        self.schema.as_ref().and_then(|s| s.get_meta_string(key))
+    }
+}
+
+#[cfg(test)]
+#[path = "model_test.rs"]
+mod tests;

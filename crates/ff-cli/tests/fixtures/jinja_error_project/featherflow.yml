@@ -1,0 +1,13 @@
+name: jinja_error_project
+version: 1.0.0
+materialization: view
+dialect: duckdb
+database:
+  default:
+    type: duckdb
+    path: target/dev.duckdb
+    schema: analytics
+vars:
+  known_var: hello
+query_comment:
+  enabled: false

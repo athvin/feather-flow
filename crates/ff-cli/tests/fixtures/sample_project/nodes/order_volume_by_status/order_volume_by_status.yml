@@ -1,0 +1,17 @@
+kind: function
+version: 1
+name: order_volume_by_status
+description: "Table function that returns order counts grouped by status, filtered by minimum count"
+function_type: table
+args:
+  - name: min_count
+    data_type: INTEGER
+    description: "Minimum order count threshold"
+returns:
+  columns:
+    - name: status
+      description: "Current status of the record"
+      data_type: VARCHAR
+    - name: order_count
+      description: "Number of orders"
+      data_type: INTEGER

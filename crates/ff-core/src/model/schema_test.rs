@@ -1,0 +1,598 @@
+use super::*;
+use crate::model::testing::TestType;
+
+#[test]
+fn test_parse_model_schema_1to1() {
+    let yaml = r#"
+version: 1
+description: "Staged orders from raw source"
+owner: data-team
+tags:
+  - staging
+  - orders
+columns:
+  - name: order_id
+    type: INTEGER
+    description: "Unique identifier for the order"
+    tests:
+      - unique
+      - not_null
+  - name: customer_id
+    type: INTEGER
+    tests:
+      - not_null
+"#;
+    let schema: ModelSchema = serde_yaml::from_str(yaml).unwrap();
+    assert_eq!(schema.version, 1);
+    assert_eq!(
+        schema.description,
+        Some("Staged orders from raw source".to_string())
+    );
+    assert_eq!(schema.owner, Some("data-team".to_string()));
+    assert_eq!(schema.tags, vec!["staging", "orders"]);
+    assert_eq!(schema.columns.len(), 2);
+    // get_owner should return the direct owner field
+    assert_eq!(schema.get_owner(), Some("data-team".to_string()));
+}
+
+#[test]
+fn test_parse_owner_metadata() {
+    let yaml = r##"
+version: 1
+meta:
+  owner: analytics-team@example.com
+  team: Analytics
+  slack_channel: "#data-alerts"
+  pagerduty_service: data-platform
+"##;
+    let schema: ModelSchema = serde_yaml::from_str(yaml).unwrap();
+
+    // Direct owner field should be None
+    assert!(schema.owner.is_none());
+
+    // Meta fields should be populated
+    assert_eq!(
+        schema.get_meta_string("owner"),
+        Some("analytics-team@example.com".to_string())
+    );
+    assert_eq!(
+        schema.get_meta_string("team"),
+        Some("Analytics".to_string())
+    );
+    assert_eq!(
+        schema.get_meta_string("slack_channel"),
+        Some("#data-alerts".to_string())
+    );
+
+    // get_owner should fall back to meta.owner
+    assert_eq!(
+        schema.get_owner(),
+        Some("analytics-team@example.com".to_string())
+    );
+}
+
+#[test]
+fn test_owner_direct_takes_precedence_over_meta() {
+    let yaml = r#"
+version: 1
+owner: direct-owner
+meta:
+  owner: meta-owner
+  team: Analytics
+"#;
+    let schema: ModelSchema = serde_yaml::from_str(yaml).unwrap();
+
+    // get_owner should return direct owner over meta.owner
+    assert_eq!(schema.get_owner(), Some("direct-owner".to_string()));
+
+    // But we can still access meta.owner directly
+    assert_eq!(
+        schema.get_meta_string("owner"),
+        Some("meta-owner".to_string())
+    );
+}
+
+#[test]
+fn test_model_schema_extract_tests() {
+    let yaml = r#"
+version: 1
+columns:
+  - name: order_id
+    type: INTEGER
+    tests:
+      - unique
+      - not_null
+  - name: customer_id
+    type: INTEGER
+    tests:
+      - not_null
+"#;
+    let schema: ModelSchema = serde_yaml::from_str(yaml).unwrap();
+    let tests = schema.extract_tests("stg_orders");
+
+    assert_eq!(tests.len(), 3);
+    assert!(tests
+        .iter()
+        .any(|t| t.column == "order_id" && t.test_type == TestType::Unique));
+    assert!(tests
+        .iter()
+        .any(|t| t.column == "order_id" && t.test_type == TestType::NotNull));
+    assert!(tests
+        .iter()
+        .any(|t| t.column == "customer_id" && t.test_type == TestType::NotNull));
+}
+
+#[test]
+fn test_parse_positive_test() {
+    let yaml = r#"
+version: 1
+columns:
+  - name: amount
+    type: DECIMAL(10,2)
+    tests:
+      - positive
+"#;
+    let schema: ModelSchema = serde_yaml::from_str(yaml).unwrap();
+    let tests = schema.extract_tests("orders");
+
+    assert_eq!(tests.len(), 1);
+    assert_eq!(tests[0].test_type, TestType::Positive);
+}
+
+#[test]
+fn test_parse_non_negative_test() {
+    let yaml = r#"
+version: 1
+columns:
+  - name: quantity
+    type: INTEGER
+    tests:
+      - non_negative
+"#;
+    let schema: ModelSchema = serde_yaml::from_str(yaml).unwrap();
+    let tests = schema.extract_tests("orders");
+
+    assert_eq!(tests.len(), 1);
+    assert_eq!(tests[0].test_type, TestType::NonNegative);
+}
+
+#[test]
+fn test_parse_accepted_values_test() {
+    let yaml = r#"
+version: 1
+columns:
+  - name: status
+    type: VARCHAR
+    tests:
+      - accepted_values:
+          values: [pending, completed, cancelled]
+          quote: true
+"#;
+    let schema: ModelSchema = serde_yaml::from_str(yaml).unwrap();
+    let tests = schema.extract_tests("orders");
+
+    assert_eq!(tests.len(), 1);
+    match &tests[0].test_type {
+        TestType::AcceptedValues { values, quote } => {
+            assert_eq!(values, &["pending", "completed", "cancelled"]);
+            assert!(*quote);
+        }
+        _ => panic!("Expected AcceptedValues test type"),
+    }
+}
+
+#[test]
+fn test_parse_min_value_test() {
+    let yaml = r#"
+version: 1
+columns:
+  - name: price
+    type: DECIMAL(10,2)
+    tests:
+      - min_value:
+          value: 0.0
+"#;
+    let schema: ModelSchema = serde_yaml::from_str(yaml).unwrap();
+    let tests = schema.extract_tests("products");
+
+    assert_eq!(tests.len(), 1);
+    match &tests[0].test_type {
+        TestType::MinValue { value } => {
+            assert_eq!(*value, 0.0);
+        }
+        _ => panic!("Expected MinValue test type"),
+    }
+}
+
+#[test]
+fn test_parse_max_value_test() {
+    let yaml = r#"
+version: 1
+columns:
+  - name: discount
+    type: DECIMAL(10,2)
+    tests:
+      - max_value:
+          value: 100.0
+"#;
+    let schema: ModelSchema = serde_yaml::from_str(yaml).unwrap();
+    let tests = schema.extract_tests("products");
+
+    assert_eq!(tests.len(), 1);
+    match &tests[0].test_type {
+        TestType::MaxValue { value } => {
+            assert_eq!(*value, 100.0);
+        }
+        _ => panic!("Expected MaxValue test type"),
+    }
+}
+
+#[test]
+fn test_parse_regex_test() {
+    let yaml = r#"
+version: 1
+columns:
+  - name: email
+    type: VARCHAR
+    tests:
+      - regex:
+          pattern: "^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\\.[a-zA-Z0-9-.]+$"
+"#;
+    let schema: ModelSchema = serde_yaml::from_str(yaml).unwrap();
+    let tests = schema.extract_tests("users");
+
+    assert_eq!(tests.len(), 1);
+    match &tests[0].test_type {
+        TestType::Regex { pattern } => {
+            assert!(pattern.contains("@"));
+        }
+        _ => panic!("Expected Regex test type"),
+    }
+}
+
+#[test]
+fn test_parse_mixed_tests() {
+    let yaml = r#"
+version: 1
+columns:
+  - name: order_id
+    type: INTEGER
+    tests:
+      - unique
+      - not_null
+  - name: amount
+    type: DECIMAL(10,2)
+    tests:
+      - positive
+      - min_value:
+          value: 1.0
+  - name: status
+    type: VARCHAR
+    tests:
+      - accepted_values:
+          values: [pending, completed]
+          quote: true
+"#;
+    let schema: ModelSchema = serde_yaml::from_str(yaml).unwrap();
+    let tests = schema.extract_tests("orders");
+
+    assert_eq!(tests.len(), 5);
+}
+
+#[test]
+fn test_parse_column_full_schema() {
+    let yaml = r#"
+version: 1
+columns:
+  - name: user_id
+    type: BIGINT
+    description: "Unique identifier for the user"
+    primary_key: true
+    tests:
+      - unique
+      - not_null
+  - name: customer_id
+    type: BIGINT
+    description: "Foreign key to customers table"
+    references:
+      model: dim_customers
+      column: customer_id
+    tests:
+      - not_null
+"#;
+    let schema: ModelSchema = serde_yaml::from_str(yaml).unwrap();
+    assert_eq!(schema.columns.len(), 2);
+
+    let user_col = &schema.columns[0];
+    assert_eq!(user_col.name, "user_id");
+    assert_eq!(user_col.data_type, "BIGINT");
+    assert_eq!(
+        user_col.description,
+        Some("Unique identifier for the user".to_string())
+    );
+    assert!(user_col.primary_key);
+    assert!(user_col.references.is_none());
+
+    let customer_col = &schema.columns[1];
+    assert_eq!(customer_col.name, "customer_id");
+    assert!(!customer_col.primary_key);
+    assert!(customer_col.references.is_some());
+    let refs = customer_col.references.as_ref().unwrap();
+    assert_eq!(refs.model, "dim_customers");
+    assert_eq!(refs.column, "customer_id");
+}
+
+#[test]
+fn test_yaml_with_config_key_fails_to_parse() {
+    let yaml = r#"
+version: 1
+description: "Test model"
+config:
+  materialized: table
+  schema: staging
+columns:
+  - name: id
+    type: INTEGER
+    tests:
+      - unique
+"#;
+    let result: Result<ModelSchema, _> = serde_yaml::from_str(yaml);
+    assert!(
+        result.is_err(),
+        "YAML with config: key should fail to parse"
+    );
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("unknown field"),
+        "Error should mention unknown field, got: {err}"
+    );
+}
+
+#[test]
+fn test_parse_relationship_test() {
+    let yaml = r#"
+version: 1
+columns:
+  - name: customer_id
+    type: INTEGER
+    tests:
+      - relationship:
+          to: customers
+          field: id
+"#;
+    let schema: ModelSchema = serde_yaml::from_str(yaml).unwrap();
+    let tests = schema.extract_tests("orders");
+
+    assert_eq!(tests.len(), 1);
+    match &tests[0].test_type {
+        TestType::Relationship { to, field } => {
+            assert_eq!(to, "customers");
+            assert_eq!(field, &Some("id".to_string()));
+        }
+        _ => panic!("Expected Relationship test type"),
+    }
+}
+
+#[test]
+fn test_parse_relationship_test_default_field() {
+    let yaml = r#"
+version: 1
+columns:
+  - name: user_id
+    type: INTEGER
+    tests:
+      - relationship:
+          to: users
+"#;
+    let schema: ModelSchema = serde_yaml::from_str(yaml).unwrap();
+    let tests = schema.extract_tests("posts");
+
+    assert_eq!(tests.len(), 1);
+    match &tests[0].test_type {
+        TestType::Relationship { to, field } => {
+            assert_eq!(to, "users");
+            assert!(field.is_none());
+        }
+        _ => panic!("Expected Relationship test type"),
+    }
+}
+
+#[test]
+fn test_parse_relationships_alias() {
+    // dbt uses "relationships" (plural) - we support both
+    let yaml = r#"
+version: 1
+columns:
+  - name: order_id
+    type: INTEGER
+    tests:
+      - relationships:
+          to: orders
+          field: id
+"#;
+    let schema: ModelSchema = serde_yaml::from_str(yaml).unwrap();
+    let tests = schema.extract_tests("order_items");
+
+    assert_eq!(tests.len(), 1);
+    match &tests[0].test_type {
+        TestType::Relationship { to, field } => {
+            assert_eq!(to, "orders");
+            assert_eq!(field, &Some("id".to_string()));
+        }
+        _ => panic!("Expected Relationship test type"),
+    }
+}
+
+#[test]
+fn test_schema_helper_methods() {
+    let yaml = r#"
+version: 1
+columns:
+  - name: order_id
+    data_type: INTEGER
+  - name: customer_id
+    data_type: VARCHAR
+"#;
+    let schema: ModelSchema = serde_yaml::from_str(yaml).unwrap();
+
+    // Test get_column
+    let order_id = schema.get_column("order_id");
+    assert!(order_id.is_some());
+    assert_eq!(order_id.unwrap().data_type, "INTEGER");
+
+    // Case-insensitive lookup
+    let order_id_upper = schema.get_column("ORDER_ID");
+    assert!(order_id_upper.is_some());
+
+    // Non-existent column
+    let missing = schema.get_column("nonexistent");
+    assert!(missing.is_none());
+
+    // Test column_names
+    let names = schema.column_names();
+    assert_eq!(names.len(), 2);
+    assert!(names.contains(&"order_id"));
+    assert!(names.contains(&"customer_id"));
+}
+
+#[test]
+fn test_unsupported_schema_version() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let yml_path = dir.path().join("test.yml");
+    std::fs::write(
+        &yml_path,
+        "version: 2\ncolumns:\n  - name: id\n    type: INTEGER\n",
+    )
+    .unwrap();
+
+    let result = ModelSchema::load(&yml_path);
+    assert!(result.is_err(), "version 2 should be rejected");
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("E018"),
+        "Error should reference E018, got: {err}"
+    );
+    assert!(
+        err.contains("version 2"),
+        "Error should mention version 2, got: {err}"
+    );
+}
+
+#[test]
+fn test_deprecated_model() {
+    let yaml = r#"
+version: 1
+deprecated: true
+deprecation_message: "Use fct_orders_v2 instead"
+columns:
+  - name: id
+    type: INTEGER
+"#;
+    let schema: ModelSchema = serde_yaml::from_str(yaml).unwrap();
+
+    assert!(schema.deprecated);
+    assert_eq!(
+        schema.deprecation_message,
+        Some("Use fct_orders_v2 instead".to_string())
+    );
+}
+
+#[test]
+fn test_parse_python_model_schema() {
+    let yaml = r#"
+version: 1
+kind: python
+description: "Python model that enriches data"
+depends_on:
+  - stg_orders
+  - dim_customers
+columns:
+  - name: order_id
+    type: INTEGER
+  - name: score
+    type: DOUBLE
+python:
+  requires-python: ">=3.11"
+  dependencies:
+    - "pandas>=2.0"
+    - "scikit-learn>=1.3"
+"#;
+    let schema: ModelSchema = serde_yaml::from_str(yaml).unwrap();
+    assert_eq!(schema.version, 1);
+    assert_eq!(schema.kind, ModelKind::Python);
+    assert_eq!(
+        schema.description,
+        Some("Python model that enriches data".to_string())
+    );
+    assert_eq!(schema.depends_on, vec!["stg_orders", "dim_customers"]);
+    assert_eq!(schema.columns.len(), 2);
+    assert_eq!(schema.columns[0].name, "order_id");
+    assert_eq!(schema.columns[1].name, "score");
+
+    let python_config = schema.python.as_ref().unwrap();
+    assert_eq!(python_config.requires_python, Some(">=3.11".to_string()));
+    assert_eq!(python_config.dependencies.len(), 2);
+    assert_eq!(python_config.dependencies[0], "pandas>=2.0");
+    assert_eq!(python_config.dependencies[1], "scikit-learn>=1.3");
+}
+
+#[test]
+fn test_parse_python_model_minimal() {
+    let yaml = r#"
+version: 1
+kind: python
+depends_on:
+  - source_table
+columns:
+  - name: id
+    type: INTEGER
+"#;
+    let schema: ModelSchema = serde_yaml::from_str(yaml).unwrap();
+    assert_eq!(schema.kind, ModelKind::Python);
+    assert_eq!(schema.depends_on, vec!["source_table"]);
+    assert!(schema.python.is_none());
+}
+
+#[test]
+fn test_python_kind_display() {
+    assert_eq!(ModelKind::Python.to_string(), "python");
+    assert_eq!(ModelKind::Model.to_string(), "sql");
+    assert_eq!(ModelKind::Seed.to_string(), "seed");
+}
+
+#[test]
+fn test_description_ai_generated_flag() {
+    let yaml = r#"
+version: 1
+description: "AI-generated staging model description"
+description_ai_generated: true
+columns:
+  - name: customer_id
+    type: INTEGER
+    description: "Unique identifier"
+    description_ai_generated: false
+  - name: email
+    type: VARCHAR
+    description: "AI-generated email description"
+    description_ai_generated: true
+"#;
+    let schema: ModelSchema = serde_yaml::from_str(yaml).unwrap();
+    assert_eq!(schema.description_ai_generated, Some(true));
+    assert_eq!(schema.columns[0].description_ai_generated, Some(false));
+    assert_eq!(schema.columns[1].description_ai_generated, Some(true));
+}
+
+#[test]
+fn test_description_ai_generated_defaults_to_none() {
+    let yaml = r#"
+version: 1
+description: "Description with unknown provenance"
+columns:
+  - name: id
+    type: INTEGER
+    description: "Column description with unknown provenance"
+"#;
+    let schema: ModelSchema = serde_yaml::from_str(yaml).unwrap();
+    assert_eq!(schema.description_ai_generated, None);
+    assert_eq!(schema.columns[0].description_ai_generated, None);
+}

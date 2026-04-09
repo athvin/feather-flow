@@ -1,0 +1,39 @@
+# Rust build artifacts
+/target/
+**/target/
+**/*.rs.bk
+
+# Cargo
+Cargo.lock
+!Cargo.lock
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# Distribution
+/dist/
+
+# Node (VS Code extension)
+vscode-featherflow/node_modules/
+vscode-featherflow/dist/
+*.vsix
+
+# Test artifacts
+/tmp/
+*.log
+
+# Docker
+*.tar

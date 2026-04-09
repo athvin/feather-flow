@@ -1,0 +1,11 @@
+kind: sql
+version: 1
+name: crossed
+description: "CROSS JOIN — should trigger A032"
+columns:
+  - name: a_id
+    description: "The a id value"
+    data_type: INTEGER
+  - name: b_id
+    description: "The b id value"
+    data_type: INTEGER

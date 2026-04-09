@@ -1,0 +1,507 @@
+//! Model compilation: loading from cache/manifest, compiling fresh, and DAG resolution.
+
+use anyhow::{Context, Result};
+use ff_core::config::{IncrementalStrategy, Materialization, OnSchemaChange};
+use ff_core::dag::ModelDag;
+use ff_core::model::ModelSchema;
+use ff_core::selector::Selector;
+use ff_core::Project;
+use ff_meta::manifest::Manifest;
+use ff_sql::{extract_dependencies, SqlParser};
+use std::collections::{HashMap, HashSet};
+use std::path::Path;
+
+use crate::cli::{GlobalArgs, RunArgs};
+use crate::commands::common;
+
+/// Compiled model data needed for execution
+#[derive(Clone)]
+pub(crate) struct CompiledModel {
+    /// Primary SQL (for non-incremental models this is the only SQL;
+    /// for incremental models this is the full-refresh path, i.e. is_exists=false).
+    pub(crate) sql: String,
+    /// For incremental models: SQL compiled with is_exists()=true.
+    /// At runtime, execution picks `incremental_sql` when the target table exists,
+    /// and `sql` (full path) when it does not.
+    pub(crate) incremental_sql: Option<String>,
+    pub(crate) materialization: Materialization,
+    pub(crate) schema: Option<String>,
+    pub(crate) dependencies: Vec<String>,
+    /// Unique key(s) for incremental merge/delete_insert strategies
+    pub(crate) unique_key: Option<Vec<String>>,
+    /// Incremental strategy (append, merge, delete_insert)
+    pub(crate) incremental_strategy: Option<IncrementalStrategy>,
+    /// How to handle schema changes for incremental models
+    pub(crate) on_schema_change: Option<OnSchemaChange>,
+    /// SQL statements to execute before the model runs
+    pub(crate) pre_hook: Vec<String>,
+    /// SQL statements to execute after the model runs
+    pub(crate) post_hook: Vec<String>,
+    /// Model schema (from .yml file)
+    pub(crate) model_schema: Option<ModelSchema>,
+    /// Query comment to attach when executing SQL
+    pub(crate) query_comment: Option<String>,
+    /// Where to place the query comment (append or prepend)
+    pub(crate) comment_placement: ff_core::config::CommentPlacement,
+    /// Whether this model uses Write-Audit-Publish pattern
+    pub(crate) wap: bool,
+    /// Whether this is a Python model (executed via `uv run`)
+    pub(crate) is_python: bool,
+    /// Path to the Python script (only set for Python models)
+    pub(crate) script_path: Option<std::path::PathBuf>,
+}
+
+/// Compile all models from source templates.
+///
+/// Previously supported a manifest-based cache path; now always compiles
+/// fresh since template rendering is fast and avoids staleness issues.
+pub(crate) fn load_or_compile_models(
+    project: &Project,
+    _args: &RunArgs,
+    global: &GlobalArgs,
+    comment_ctx: Option<&ff_core::query_comment::QueryCommentContext>,
+) -> Result<HashMap<String, CompiledModel>> {
+    let all_model_names: Vec<String> = project
+        .model_names()
+        .into_iter()
+        .map(String::from)
+        .collect();
+
+    if global.verbose {
+        eprintln!("[verbose] Compiling {} models", all_model_names.len());
+    }
+    compile_all_models(
+        project,
+        &all_model_names,
+        global.database.as_deref(),
+        comment_ctx,
+    )
+}
+
+/// Shared state for compiling SQL models.
+struct CompileEnv<'a> {
+    project: &'a Project,
+    jinja: ff_jinja::JinjaEnvironment<'a>,
+    parser: SqlParser,
+    known_models: HashSet<&'a str>,
+    external_tables: HashSet<String>,
+    comment_ctx: Option<&'a ff_core::query_comment::QueryCommentContext>,
+}
+
+/// Compile all models fresh
+fn compile_all_models(
+    project: &Project,
+    model_names: &[String],
+    database: Option<&str>,
+    comment_ctx: Option<&ff_core::query_comment::QueryCommentContext>,
+) -> Result<HashMap<String, CompiledModel>> {
+    let env = CompileEnv {
+        project,
+        jinja: common::build_jinja_env_with_context(project, database, true),
+        parser: SqlParser::from_dialect_name(&project.config.dialect.to_string())
+            .context("Invalid SQL dialect")?,
+        known_models: {
+            let mut km: HashSet<&str> = project.models.keys().map(|k| k.as_str()).collect();
+            for seed in &project.seeds {
+                km.insert(seed.name.as_str());
+            }
+            km
+        },
+        external_tables: common::build_external_tables_lookup(project),
+        comment_ctx,
+    };
+
+    let mut compiled_models = HashMap::with_capacity(model_names.len());
+
+    for name in model_names {
+        let model = project
+            .get_model(name)
+            .with_context(|| format!("Model not found: {}", name))?;
+
+        let compiled = if model.is_python() {
+            compile_python_model(model, project)
+        } else {
+            compile_sql_model(name, model, &env)?
+        };
+
+        compiled_models.insert(name.to_string(), compiled);
+    }
+
+    Ok(compiled_models)
+}
+
+/// Compile a Python model (no Jinja/SQL — deps come from YAML).
+fn compile_python_model(
+    model: &ff_core::model::Model,
+    project: &ff_core::Project,
+) -> CompiledModel {
+    let model_deps: Vec<String> = model.depends_on.iter().map(|m| m.to_string()).collect();
+    let schema = model
+        .config
+        .schema
+        .clone()
+        .or_else(|| project.config.get_schema(None).map(|s| s.to_string()));
+
+    CompiledModel {
+        sql: String::new(),
+        incremental_sql: None,
+        materialization: Materialization::Table,
+        schema,
+        dependencies: model_deps,
+        unique_key: None,
+        incremental_strategy: None,
+        on_schema_change: None,
+        pre_hook: Vec::new(),
+        post_hook: Vec::new(),
+        model_schema: model.schema.clone(),
+        query_comment: None,
+        comment_placement: Default::default(),
+        wap: false,
+        is_python: true,
+        script_path: Some(model.path.clone()),
+    }
+}
+
+/// Compile a single SQL model: render Jinja, parse SQL, extract deps, build config.
+fn compile_sql_model(
+    name: &str,
+    model: &ff_core::model::Model,
+    env: &CompileEnv<'_>,
+) -> Result<CompiledModel> {
+    let rendered = env
+        .jinja
+        .render(&model.raw_sql)
+        .with_context(|| format!("Failed to render template for model: {}", name))?;
+
+    let statements = env
+        .parser
+        .parse(&rendered)
+        .with_context(|| format!("Failed to parse SQL for model: {}", name))?;
+
+    let deps = extract_dependencies(&statements);
+    let (mut model_deps, _, unknown_deps) = ff_sql::extractor::categorize_dependencies_with_unknown(
+        deps,
+        &env.known_models,
+        &env.external_tables,
+    );
+
+    let (func_model_deps, remaining_unknown) = common::resolve_function_dependencies(
+        &unknown_deps,
+        env.project,
+        &env.parser,
+        &env.known_models,
+        &env.external_tables,
+    );
+    model_deps.extend(func_model_deps);
+    model_deps.sort();
+    model_deps.dedup();
+
+    if !remaining_unknown.is_empty() {
+        let unknown_list = remaining_unknown.join(", ");
+        anyhow::bail!(
+            "Unknown dependencies in model '{}': [{}]. \
+             Each table must be defined as a model, seed, source, or function.",
+            name,
+            unknown_list
+        );
+    }
+
+    let mat = model
+        .config
+        .materialized
+        .unwrap_or(env.project.config.materialization);
+
+    let schema = model
+        .config
+        .schema
+        .clone()
+        .or_else(|| env.project.config.get_schema(None).map(|s| s.to_string()));
+
+    let unique_key = if mat == Materialization::Incremental {
+        model.unique_key()
+    } else {
+        None
+    };
+    let incremental_strategy = if mat == Materialization::Incremental {
+        model.config.incremental_strategy
+    } else {
+        None
+    };
+    let on_schema_change = if mat == Materialization::Incremental {
+        model.config.on_schema_change
+    } else {
+        None
+    };
+
+    let pre_hook = model.config.pre_hook.clone();
+    let post_hook = model.config.post_hook.clone();
+
+    let wap = model.wap_enabled();
+
+    let comment_placement = env
+        .comment_ctx
+        .map(|ctx| ctx.config.placement)
+        .unwrap_or_default();
+    let query_comment = env.comment_ctx.map(|ctx| {
+        let node_path = model
+            .path
+            .strip_prefix(&env.project.root)
+            .ok()
+            .map(|p| p.to_string_lossy().to_string());
+        let input = ff_core::query_comment::ModelCommentInput {
+            model_name: name,
+            materialization: &mat.to_string(),
+            node_path: node_path.as_deref(),
+            schema: schema.as_deref(),
+        };
+        ctx.build_comment(&input)
+    });
+
+    let (final_sql, incremental_sql) = if mat == Materialization::Incremental {
+        let macro_paths = env.project.config.macro_paths_absolute(&env.project.root);
+        let template_ctx = common::build_template_context(env.project, None, true);
+
+        let jinja_full = ff_jinja::JinjaEnvironment::with_is_exists(
+            &env.project.config.vars,
+            &macro_paths,
+            Some(&template_ctx),
+            false,
+        );
+        let full_rendered = jinja_full
+            .render(&model.raw_sql)
+            .with_context(|| format!("Failed to render full path template for model: {}", name))?;
+
+        let jinja_inc = ff_jinja::JinjaEnvironment::with_is_exists(
+            &env.project.config.vars,
+            &macro_paths,
+            Some(&template_ctx),
+            true,
+        );
+        let inc_rendered = jinja_inc.render(&model.raw_sql).with_context(|| {
+            format!(
+                "Failed to render incremental path template for model: {}",
+                name
+            )
+        })?;
+
+        (full_rendered, Some(inc_rendered))
+    } else {
+        (rendered, None)
+    };
+
+    Ok(CompiledModel {
+        sql: final_sql,
+        incremental_sql,
+        materialization: mat,
+        schema,
+        dependencies: model_deps,
+        unique_key,
+        incremental_strategy,
+        on_schema_change,
+        pre_hook,
+        post_hook,
+        model_schema: model.schema.clone(),
+        query_comment,
+        comment_placement,
+        wap,
+        is_python: false,
+        script_path: None,
+    })
+}
+
+/// Load the deferred manifest from --defer path.
+///
+/// Returns error if manifest doesn't exist or can't be parsed.
+fn load_deferred_manifest(defer_path: &str, global: &GlobalArgs) -> Result<Manifest> {
+    let path = Path::new(defer_path);
+
+    if !path.exists() {
+        anyhow::bail!("Deferred manifest not found at: {}", defer_path);
+    }
+
+    if global.verbose {
+        eprintln!("[verbose] Loading deferred manifest from: {}", defer_path);
+    }
+
+    Manifest::load(path)
+        .with_context(|| format!("Failed to parse deferred manifest at: {}", defer_path))
+}
+
+/// Resolve unselected upstream dependencies from deferred manifest.
+///
+/// Returns the list of models that should be deferred (not executed).
+fn resolve_deferred_dependencies(
+    selected_models: &[String],
+    compiled_models: &HashMap<String, CompiledModel>,
+    deferred_manifest: &Manifest,
+    global: &GlobalArgs,
+) -> Result<HashSet<String>> {
+    let selected_set: HashSet<String> = selected_models.iter().cloned().collect();
+    let mut deferred_models: HashSet<String> = HashSet::new();
+
+    for model_name in selected_models {
+        let Some(compiled) = compiled_models.get(model_name) else {
+            continue;
+        };
+        for dep in &compiled.dependencies {
+            if selected_set.contains(dep) {
+                continue;
+            }
+            if deferred_models.contains(dep) {
+                continue;
+            }
+            if deferred_manifest.get_model(dep).is_none() {
+                anyhow::bail!(
+                    "Model '{}' not found in deferred manifest. It is required by: {}",
+                    dep,
+                    model_name
+                );
+            }
+            deferred_models.insert(dep.clone());
+            if global.verbose {
+                eprintln!("[verbose] Deferring {} to production manifest", dep);
+            }
+        }
+    }
+
+    let mut to_check: Vec<String> = deferred_models.iter().cloned().collect();
+    while let Some(model_name) = to_check.pop() {
+        let Some(manifest_model) = deferred_manifest.get_model(&model_name) else {
+            continue;
+        };
+        for dep in &manifest_model.depends_on {
+            let dep_str = dep.as_str();
+            if selected_set.contains(dep_str)
+                || deferred_models.contains(dep_str)
+                || deferred_manifest.get_model(dep_str).is_none()
+            {
+                continue;
+            }
+            deferred_models.insert(dep_str.to_string());
+            to_check.push(dep_str.to_string());
+            if global.verbose {
+                eprintln!(
+                    "[verbose] Deferring {} to production manifest (transitive)",
+                    dep
+                );
+            }
+        }
+    }
+
+    Ok(deferred_models)
+}
+
+/// Determine execution order based on DAG and CLI arguments
+pub(crate) fn determine_execution_order(
+    compiled_models: &HashMap<String, CompiledModel>,
+    project: &Project,
+    args: &RunArgs,
+    global: &GlobalArgs,
+) -> Result<Vec<String>> {
+    let dependencies: HashMap<String, Vec<String>> = compiled_models
+        .iter()
+        .map(|(name, model)| (name.clone(), model.dependencies.clone()))
+        .collect();
+
+    let dag = ModelDag::build(&dependencies).context("Failed to build dependency graph")?;
+
+    let reference_manifest: Option<Manifest> = if let Some(state_path) = &args.state {
+        let path = Path::new(state_path);
+        if !path.exists() {
+            anyhow::bail!("State manifest not found: {}", state_path);
+        }
+        if global.verbose {
+            eprintln!("[verbose] Loading reference manifest from: {}", state_path);
+        }
+        Some(Manifest::load(path).context("Failed to load reference manifest")?)
+    } else {
+        None
+    };
+
+    if args.defer.is_some() && args.state.is_none() && args.nodes.is_none() {
+        anyhow::bail!(
+            "The --defer flag requires either --state or --nodes to specify which models to run"
+        );
+    }
+
+    let topo_order = dag
+        .topological_order()
+        .context("Failed to get execution order")?;
+
+    let models_to_run: Vec<String> = if let Some(nodes_str) = &args.nodes {
+        let mut combined = Vec::new();
+        for token in nodes_str.split(',') {
+            let token = token.trim();
+            if token.is_empty() {
+                continue;
+            }
+            let selector = Selector::parse(token).context("Invalid selector")?;
+            if selector.requires_state() && reference_manifest.is_none() {
+                anyhow::bail!(
+                    "state: selector requires --state flag with path to reference manifest"
+                );
+            }
+            let ref_manifest: Option<&dyn ff_core::reference_manifest::ReferenceManifest> =
+                reference_manifest.as_ref().map(|m| m as _);
+            let matched = selector
+                .apply_with_state(&project.models, &dag, ref_manifest)
+                .context("Failed to apply selector")?;
+            combined.extend(matched);
+        }
+        let combined_set: std::collections::HashSet<String> = combined.into_iter().collect();
+        topo_order
+            .iter()
+            .filter(|m| combined_set.contains(m.as_str()))
+            .cloned()
+            .collect()
+    } else {
+        topo_order.clone()
+    };
+
+    let models_after_exclusion: Vec<String> = if let Some(exclude) = &args.exclude {
+        let excluded: HashSet<String> = exclude
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        models_to_run
+            .into_iter()
+            .filter(|m| !excluded.contains(m))
+            .collect()
+    } else {
+        models_to_run
+    };
+
+    let deferred_models: HashSet<String> = if let Some(defer_path) = &args.defer {
+        let deferred_manifest = load_deferred_manifest(defer_path, global)?;
+
+        let deferred = resolve_deferred_dependencies(
+            &models_after_exclusion,
+            compiled_models,
+            &deferred_manifest,
+            global,
+        )?;
+
+        if !deferred.is_empty() {
+            println!(
+                "Deferring {} model(s) to manifest at: {}",
+                deferred.len(),
+                defer_path
+            );
+            for model in &deferred {
+                println!("  → {}", model);
+            }
+            println!();
+        }
+        deferred
+    } else {
+        HashSet::new()
+    };
+
+    let execution_order: Vec<String> = topo_order
+        .into_iter()
+        .filter(|m| models_after_exclusion.contains(m) && !deferred_models.contains(m))
+        .collect();
+
+    Ok(execution_order)
+}

@@ -1,0 +1,12 @@
+kind: sql
+version: 1
+name: contradiction
+description: "LEFT JOIN makes name nullable, but YAML declares NOT NULL — should trigger A011"
+columns:
+  - name: id
+    description: "Unique identifier for the record"
+    data_type: INTEGER
+  - name: name
+    description: "Name of the entity"
+    data_type: VARCHAR
+    tests: [not_null]

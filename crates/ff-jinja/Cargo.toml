@@ -1,0 +1,21 @@
+[package]
+name = "ff-jinja"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Jinja templating layer for Featherflow - config() and var() functions"
+
+[dependencies]
+thiserror.workspace = true
+minijinja.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
+regex = "1.10"
+log.workspace = true
+chrono.workspace = true
+uuid.workspace = true
+ff-core = { path = "../ff-core" }
+
+[dev-dependencies]
+tempfile = "3.10"

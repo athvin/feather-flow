@@ -1,0 +1,26 @@
+version: 1
+kind: sql
+
+description: "Staged orders from raw source"
+tags:
+  - staging
+
+columns:
+  - name: order_id
+    type: INTEGER
+    description: "Unique order identifier"
+    tests:
+      - unique
+      - not_null
+
+  - name: customer_id
+    description: "Unique identifier for the customer"
+    type: INTEGER
+    tests:
+      - not_null
+
+  - name: amount
+    description: "Monetary amount in dollars"
+    type: DECIMAL(10,2)
+    tests:
+      - not_null

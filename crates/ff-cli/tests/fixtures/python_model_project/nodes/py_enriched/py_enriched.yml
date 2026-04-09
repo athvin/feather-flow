@@ -1,0 +1,20 @@
+version: 1
+kind: python
+description: "Python model that enriches source data with a score"
+
+depends_on:
+  - stg_source
+
+columns:
+  - name: id
+    description: "Unique identifier for the record"
+    type: INTEGER
+  - name: name
+    description: "Name of the entity"
+    type: VARCHAR
+  - name: amount
+    description: "Monetary amount in dollars"
+    type: DOUBLE
+  - name: score
+    description: "Numeric score value"
+    type: DOUBLE

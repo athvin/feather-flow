@@ -1,0 +1,12 @@
+name: node_paths_project
+version: 1.0.0
+materialization: view
+dialect: duckdb
+database:
+  default:
+    type: duckdb
+    path: ':memory:'
+    name: main
+    schema: analytics
+vars:
+  start_date: '2024-01-01'

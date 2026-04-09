@@ -1,0 +1,713 @@
+//! CLI argument definitions using clap derive API
+
+use clap::{Args, Parser, Subcommand, ValueEnum};
+use std::path::PathBuf;
+
+/// Featherflow - A dbt-like CLI tool for SQL templating and execution
+#[derive(Parser, Debug)]
+#[command(name = "ff")]
+#[command(author, version, about, long_about = None)]
+pub(crate) struct Cli {
+    /// Global options
+    #[command(flatten)]
+    pub global: GlobalArgs,
+
+    /// Subcommand to execute
+    #[command(subcommand)]
+    pub command: Commands,
+}
+
+/// Global arguments available to all commands
+#[derive(Args, Debug, Clone)]
+pub(crate) struct GlobalArgs {
+    /// Enable verbose output
+    #[arg(short, long, global = true)]
+    pub verbose: bool,
+
+    /// Path to project directory
+    #[arg(short = 'p', long, global = true, default_value = ".")]
+    pub project_dir: PathBuf,
+
+    /// Select named database connection (from featherflow.yml)
+    #[arg(short = 'd', long, global = true)]
+    pub database: Option<String>,
+}
+
+/// Available subcommands
+#[derive(Subcommand, Debug)]
+pub(crate) enum Commands {
+    /// Execute compiled SQL against the database
+    Run(RunArgs),
+
+    /// Execute a standalone SQL macro
+    RunMacro(RunMacroArgs),
+
+    /// Developer tooling (compile, analyze, format, deploy, etc.)
+    #[command(name = "dt")]
+    Dt(DtArgs),
+}
+
+/// Output formats for run/test/compile commands (for CI integration)
+#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum OutputFormat {
+    /// Human-readable text output (default)
+    #[default]
+    Text,
+    /// Machine-readable JSON output
+    Json,
+}
+
+/// Arguments for the compile command
+#[derive(Args, Debug)]
+pub(crate) struct CompileArgs {
+    /// Node selector (names, +node, node+, N+node, node+N, tag:X, path:X)
+    #[arg(short = 'n', long)]
+    pub nodes: Option<String>,
+
+    /// Override output directory
+    #[arg(long)]
+    pub output_dir: Option<String>,
+
+    /// Override/add variables as JSON
+    #[arg(long)]
+    pub vars: Option<String>,
+
+    /// Parse and validate only, don't write output files
+    #[arg(long)]
+    pub parse_only: bool,
+
+    /// Skip DataFusion static analysis
+    #[arg(long)]
+    pub skip_static_analysis: bool,
+
+    /// Print the DataFusion LogicalPlan for a model
+    #[arg(long)]
+    pub explain: Option<String>,
+
+    /// Output format (text or json for CI integration)
+    #[arg(short, long, value_enum, default_value = "text")]
+    pub output: OutputFormat,
+
+    /// Enable strict mode (warnings become errors)
+    #[arg(long)]
+    pub strict: bool,
+
+    /// Enable governance checks (data classification completeness)
+    #[arg(long)]
+    pub governance: bool,
+}
+
+/// Arguments for the run command
+#[derive(Args, Debug, Clone)]
+pub(crate) struct RunArgs {
+    /// Run mode: models, test, or build (default from config or "build")
+    #[arg(long, value_enum)]
+    pub mode: Option<CliRunMode>,
+
+    /// Node selector (names, +node, node+, N+node, node+N, tag:X, path:X)
+    #[arg(short = 'n', long)]
+    pub nodes: Option<String>,
+
+    /// Exclude models matching this pattern
+    #[arg(short, long)]
+    pub exclude: Option<String>,
+
+    /// Drop and recreate all models
+    #[arg(long)]
+    pub full_refresh: bool,
+
+    /// Stop on first model failure
+    #[arg(long)]
+    pub fail_fast: bool,
+
+    /// Skip manifest cache and force recompilation
+    #[arg(long)]
+    pub no_cache: bool,
+
+    /// Defer to another manifest for unselected models
+    #[arg(long)]
+    pub defer: Option<String>,
+
+    /// Path to manifest for state comparison (enables state:modified selector)
+    #[arg(long)]
+    pub state: Option<String>,
+
+    /// Number of threads for parallel execution (default: 1)
+    #[arg(long, default_value = "1")]
+    pub threads: usize,
+
+    /// Resume from a previous failed run
+    #[arg(long)]
+    pub resume: bool,
+
+    /// Only retry failed models when resuming (skip pending)
+    #[arg(long)]
+    pub retry_failed: bool,
+
+    /// Path to run state file for resume (default: target/run_state.json)
+    #[arg(long)]
+    pub state_file: Option<String>,
+
+    /// Output format (text or json for CI integration)
+    #[arg(short, long, value_enum, default_value = "text")]
+    pub output: OutputFormat,
+
+    /// Suppress progress indicators (useful for CI)
+    #[arg(short, long)]
+    pub quiet: bool,
+
+    /// Smart build: skip models whose SQL, schema, and inputs haven't changed
+    #[arg(long)]
+    pub smart: bool,
+
+    /// Skip DataFusion static analysis
+    #[arg(long)]
+    pub skip_static_analysis: bool,
+
+    /// Store test failure rows to target/test_failures/ (test/build modes)
+    #[arg(long)]
+    pub store_failures: bool,
+
+    /// Treat test failures as warnings, exit 0 (test/build modes)
+    #[arg(long)]
+    pub warn_only: bool,
+
+    /// Emit structured JSON telemetry to stderr after each model execution
+    #[arg(long)]
+    pub telemetry: bool,
+}
+
+/// CLI-side run mode enum (maps to ff_core::config::RunMode)
+#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CliRunMode {
+    /// Just execute models, no tests
+    Models,
+    /// Just run tests against existing tables
+    Test,
+    /// Run model then test in DAG order (default)
+    Build,
+}
+
+/// Arguments for the ls command
+#[derive(Args, Debug)]
+pub(crate) struct LsArgs {
+    /// Output format
+    #[arg(short, long, value_enum, default_value = "table")]
+    pub output: LsOutput,
+
+    /// Node selector (names, +node, node+, N+node, node+N, tag:X, path:X)
+    #[arg(short = 'n', long)]
+    pub nodes: Option<String>,
+
+    /// Exclude models matching this pattern
+    #[arg(short, long)]
+    pub exclude: Option<String>,
+
+    /// Filter by resource type
+    #[arg(long, value_enum)]
+    pub resource_type: Option<ResourceType>,
+
+    /// Filter models by owner (matches owner field or meta.owner)
+    #[arg(long)]
+    pub owner: Option<String>,
+}
+
+/// Resource types for filtering
+#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ResourceType {
+    /// Models only
+    Model,
+    /// Sources only
+    Source,
+    /// Seeds only
+    Seed,
+    /// Tests only
+    Test,
+    /// Functions only
+    Function,
+    /// Run groups defined in featherflow.yml
+    RunGroup,
+}
+
+/// List output formats
+#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LsOutput {
+    /// Table format
+    Table,
+    /// JSON output
+    Json,
+    /// Dependency tree
+    Tree,
+    /// File paths only (one per line)
+    Path,
+}
+
+/// Arguments for the test command
+#[derive(Args, Debug)]
+pub(crate) struct TestArgs {
+    /// Node selector (names, +node, node+, N+node, node+N, tag:X, path:X)
+    #[arg(short = 'n', long)]
+    pub nodes: Option<String>,
+
+    /// Stop on first failure
+    #[arg(long)]
+    pub fail_fast: bool,
+
+    /// Store failing rows to target/test_failures/
+    #[arg(long)]
+    pub store_failures: bool,
+
+    /// Treat test failures as warnings (exit 0)
+    #[arg(long)]
+    pub warn_only: bool,
+
+    /// Number of threads for parallel test execution (default: 1)
+    #[arg(long, default_value = "1")]
+    pub threads: usize,
+
+    /// Output format (text or json for CI integration)
+    #[arg(short, long, value_enum, default_value = "text")]
+    pub output: OutputFormat,
+
+    /// Suppress progress indicators (useful for CI)
+    #[arg(long)]
+    pub quiet: bool,
+}
+
+/// Arguments for the seed command
+#[derive(Args, Debug)]
+pub(crate) struct SeedArgs {
+    /// Seed names to load (comma-separated, default: all)
+    #[arg(short, long)]
+    pub seeds: Option<String>,
+
+    /// Drop and recreate all seed tables
+    #[arg(long)]
+    pub full_refresh: bool,
+
+    /// Display inferred schema without loading
+    #[arg(long)]
+    pub show_columns: bool,
+}
+
+/// Arguments for the build command
+#[derive(Args, Debug)]
+pub(crate) struct BuildArgs {
+    /// Node selector (names, +node, node+, N+node, node+N, tag:X, path:X)
+    #[arg(short = 'n', long)]
+    pub nodes: Option<String>,
+
+    /// Exclude models matching this pattern
+    #[arg(short, long)]
+    pub exclude: Option<String>,
+
+    /// Drop and recreate all models
+    #[arg(long)]
+    pub full_refresh: bool,
+
+    /// Stop on first failure in any phase
+    #[arg(long)]
+    pub fail_fast: bool,
+
+    /// Number of threads for parallel execution (default: 1)
+    #[arg(long, default_value = "1")]
+    pub threads: usize,
+
+    /// Store test failure rows to target/test_failures/
+    #[arg(long)]
+    pub store_failures: bool,
+
+    /// Skip DataFusion static analysis
+    #[arg(long)]
+    pub skip_static_analysis: bool,
+
+    /// Output format
+    #[arg(short, long, value_enum, default_value = "text")]
+    pub output: OutputFormat,
+
+    /// Suppress progress indicators
+    #[arg(short, long)]
+    pub quiet: bool,
+}
+
+/// Arguments for the docs command
+#[derive(Args, Debug)]
+pub(crate) struct DocsArgs {
+    /// Docs subcommand (serve, etc.)
+    #[command(subcommand)]
+    pub command: Option<DocsCommands>,
+
+    /// Node names to generate docs for (comma-separated, default: all with schemas)
+    #[arg(short = 'n', long)]
+    pub nodes: Option<String>,
+
+    /// Output directory for documentation (default: target/docs)
+    #[arg(short, long)]
+    pub output: Option<String>,
+
+    /// Output format
+    #[arg(short, long, value_enum, default_value = "markdown")]
+    pub format: DocsFormat,
+}
+
+/// Docs subcommands
+#[derive(Subcommand, Debug)]
+pub(crate) enum DocsCommands {
+    /// Launch interactive documentation server
+    Serve(DocsServeArgs),
+}
+
+/// Arguments for the docs serve subcommand
+#[derive(Args, Debug)]
+pub(crate) struct DocsServeArgs {
+    /// Port to serve on
+    #[arg(long, default_value = "4040")]
+    pub port: u16,
+
+    /// Host to bind to
+    #[arg(long, default_value = "127.0.0.1")]
+    pub host: String,
+
+    /// Node selector (names, +node, node+, N+node, node+N, tag:X, path:X)
+    #[arg(short = 'n', long)]
+    pub nodes: Option<String>,
+
+    /// Don't open browser automatically
+    #[arg(long)]
+    pub no_browser: bool,
+
+    /// Export static site to directory instead of serving
+    #[arg(long)]
+    pub static_export: Option<String>,
+}
+
+/// Documentation output formats
+#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DocsFormat {
+    /// Markdown format
+    Markdown,
+    /// JSON format
+    Json,
+    /// HTML format
+    Html,
+}
+
+/// Arguments for the clean command
+#[derive(Args, Debug)]
+pub(crate) struct CleanArgs {
+    /// Show what would be deleted without actually deleting
+    #[arg(long)]
+    pub dry_run: bool,
+}
+
+/// Arguments for the run-macro command
+#[derive(Args, Debug)]
+pub(crate) struct RunMacroArgs {
+    /// Name of the macro to execute
+    pub macro_name: String,
+
+    /// Arguments to pass to the macro as JSON
+    #[arg(long)]
+    pub args: Option<String>,
+}
+
+/// Arguments for the init command
+#[derive(Args, Debug)]
+pub(crate) struct InitArgs {
+    /// Project name (also used as directory name)
+    #[arg(long)]
+    pub name: String,
+
+    /// Database file path (default: dev.duckdb)
+    #[arg(long, default_value = "dev.duckdb")]
+    pub database_path: String,
+}
+
+/// Arguments for the lineage command
+#[derive(Args, Debug)]
+pub(crate) struct LineageArgs {
+    /// Filter to a specific node
+    #[arg(short = 'n', long)]
+    pub node: Option<String>,
+
+    /// Filter to a specific column (requires --node)
+    #[arg(long, requires = "node")]
+    pub column: Option<String>,
+
+    /// Direction to trace lineage
+    #[arg(long, value_enum, default_value = "both")]
+    pub direction: LineageDirection,
+
+    /// Output format
+    #[arg(short, long, value_enum, default_value = "table")]
+    pub output: LineageOutput,
+
+    /// Filter edges by data classification (e.g., pii, sensitive)
+    #[arg(long)]
+    pub classification: Option<String>,
+}
+
+/// Lineage trace direction
+#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LineageDirection {
+    /// Trace upstream (sources)
+    Upstream,
+    /// Trace downstream (consumers)
+    Downstream,
+    /// Show both directions
+    Both,
+}
+
+/// Lineage output formats
+#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LineageOutput {
+    /// Human-readable table
+    Table,
+    /// JSON output
+    Json,
+    /// DOT graph for Graphviz
+    Dot,
+}
+
+/// Arguments for the analyze command
+#[derive(Args, Debug)]
+pub(crate) struct AnalyzeArgs {
+    /// Analyze subcommand (query, export, tables) — omit to run analysis passes
+    #[command(subcommand)]
+    pub command: Option<AnalyzeCommands>,
+
+    /// Node selector (names, +node, node+, N+node, node+N, tag:X, path:X)
+    #[arg(short = 'n', long)]
+    pub nodes: Option<String>,
+
+    /// Run only specific passes (comma-separated, e.g., type_inference,nullability)
+    #[arg(long)]
+    pub pass: Option<String>,
+
+    /// Output format
+    #[arg(short, long, value_enum, default_value = "table")]
+    pub output: AnalyzeOutput,
+
+    /// Minimum severity to display
+    #[arg(short, long, value_enum, default_value = "info")]
+    pub severity: AnalyzeSeverity,
+
+    /// Also run SQL rules against the meta database
+    #[arg(long)]
+    pub rules: bool,
+
+    /// List discovered rules without executing them (use with --rules)
+    #[arg(long, requires = "rules")]
+    pub rules_list: bool,
+}
+
+/// Analyze subcommands (meta database operations)
+#[derive(Subcommand, Debug)]
+pub(crate) enum AnalyzeCommands {
+    /// Run a SQL query against the meta database
+    Query(MetaQueryArgs),
+
+    /// Export the entire meta database as JSON
+    Export(MetaExportArgs),
+
+    /// List all meta database tables with row counts
+    Tables,
+}
+
+/// Analyze output formats
+#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AnalyzeOutput {
+    /// Human-readable table
+    Table,
+    /// JSON output
+    Json,
+}
+
+/// Arguments for the function command
+#[derive(Args, Debug)]
+pub(crate) struct FunctionArgs {
+    /// Function subcommand
+    #[command(subcommand)]
+    pub command: FunctionCommands,
+}
+
+/// Function subcommands
+#[derive(Subcommand, Debug)]
+pub(crate) enum FunctionCommands {
+    /// List all user-defined functions in the project
+    List(FunctionListArgs),
+
+    /// Deploy functions to the database
+    Deploy(FunctionDeployArgs),
+
+    /// Show details about a function
+    Show(FunctionShowArgs),
+
+    /// Validate function definitions
+    Validate(FunctionValidateArgs),
+
+    /// Drop deployed functions from the database
+    Drop(FunctionDropArgs),
+}
+
+/// Arguments for the function list subcommand
+#[derive(Args, Debug)]
+pub(crate) struct FunctionListArgs {
+    /// Output format (text or json)
+    #[arg(short, long, value_enum, default_value = "text")]
+    pub output: OutputFormat,
+}
+
+/// Arguments for the function deploy subcommand
+#[derive(Args, Debug)]
+pub(crate) struct FunctionDeployArgs {
+    /// Function names to deploy (comma-separated, default: all)
+    #[arg(short, long)]
+    pub functions: Option<String>,
+}
+
+/// Arguments for the function show subcommand
+#[derive(Args, Debug)]
+pub(crate) struct FunctionShowArgs {
+    /// Name of the function to show
+    pub name: String,
+
+    /// Show generated CREATE MACRO SQL instead of YAML definition
+    #[arg(long)]
+    pub sql: bool,
+}
+
+/// Arguments for the function validate subcommand
+#[derive(Args, Debug)]
+pub(crate) struct FunctionValidateArgs {}
+
+/// Arguments for the function drop subcommand
+#[derive(Args, Debug)]
+pub(crate) struct FunctionDropArgs {
+    /// Function names to drop (comma-separated, default: all)
+    #[arg(short, long)]
+    pub functions: Option<String>,
+}
+
+/// Minimum severity filter for analyze output
+#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum AnalyzeSeverity {
+    /// Show all diagnostics
+    Info,
+    /// Show warnings and errors only
+    Warning,
+    /// Show errors only
+    Error,
+}
+
+/// Arguments for the meta query subcommand
+#[derive(Args, Debug)]
+pub(crate) struct MetaQueryArgs {
+    /// SQL query to execute against the meta database
+    pub sql: String,
+
+    /// Output as JSON instead of table format
+    #[arg(long)]
+    pub json: bool,
+}
+
+/// Arguments for the meta export subcommand
+#[derive(Args, Debug)]
+pub(crate) struct MetaExportArgs {
+    /// Write export to a file instead of stdout
+    #[arg(short, long)]
+    pub output: Option<String>,
+}
+
+/// Arguments for the fmt command
+#[derive(Args, Debug)]
+pub(crate) struct FmtArgs {
+    /// Files or directories to format (positional args)
+    #[arg()]
+    pub paths: Vec<PathBuf>,
+
+    /// Node selector (names, +node, node+, N+node, node+N, tag:X, path:X)
+    #[arg(short = 'n', long)]
+    pub nodes: Option<String>,
+
+    /// Glob pattern to match SQL files
+    #[arg(long, value_name = "PATTERN")]
+    pub glob: Option<String>,
+
+    /// Check formatting without modifying files (exit 1 if unformatted)
+    #[arg(long)]
+    pub check: bool,
+
+    /// Show diff of formatting changes
+    #[arg(long)]
+    pub diff: bool,
+
+    /// Override max line length
+    #[arg(long)]
+    pub line_length: Option<usize>,
+
+    /// Disable Jinja formatting
+    #[arg(long)]
+    pub no_jinjafmt: bool,
+}
+
+/// Arguments for the deploy command
+#[derive(Args, Debug)]
+pub(crate) struct DeployArgs {
+    /// Deploy subcommand
+    #[command(subcommand)]
+    pub command: DeployCommands,
+}
+
+/// Deploy subcommands
+#[derive(Subcommand, Debug)]
+pub(crate) enum DeployCommands {
+    /// Load CSV seed files into the database
+    Seeds(SeedArgs),
+
+    /// Manage user-defined functions (DuckDB macros)
+    Functions(FunctionArgs),
+}
+
+/// Arguments for the dt (developer tooling) command
+#[derive(Args, Debug)]
+pub(crate) struct DtArgs {
+    /// Developer tooling subcommand
+    #[command(subcommand)]
+    pub command: DtCommands,
+}
+
+/// Developer tooling subcommands
+#[derive(Subcommand, Debug)]
+pub(crate) enum DtCommands {
+    /// Initialize a new Featherflow project
+    Init(InitArgs),
+
+    /// Compile Jinja templates to SQL
+    Compile(CompileArgs),
+
+    /// List models and their dependencies
+    Ls(LsArgs),
+
+    /// Remove generated artifacts
+    Clean(CleanArgs),
+
+    /// Format SQL source files with sqlfmt
+    Fmt(FmtArgs),
+
+    /// Show column-level lineage across models
+    Lineage(LineageArgs),
+
+    /// Generate documentation from schema files
+    Docs(DocsArgs),
+
+    /// Deploy seeds or functions to the database
+    Deploy(DeployArgs),
+
+    /// Analyze SQL models for potential issues
+    Analyze(AnalyzeArgs),
+}
+
+#[cfg(test)]
+#[path = "cli_test.rs"]
+mod tests;

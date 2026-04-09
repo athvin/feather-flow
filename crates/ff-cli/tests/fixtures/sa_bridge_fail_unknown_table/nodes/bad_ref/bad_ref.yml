@@ -1,0 +1,8 @@
+kind: sql
+version: 1
+name: bad_ref
+description: "References a table that does not exist"
+columns:
+  - name: id
+    description: "Unique identifier for the record"
+    data_type: INTEGER

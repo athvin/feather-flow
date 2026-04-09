@@ -1,0 +1,8 @@
+kind: sql
+version: 1
+name: clean_join
+description: "Clean equi-join — no A030, A032, or A033"
+columns:
+  - name: id
+    description: "Unique identifier for the record"
+    data_type: INTEGER

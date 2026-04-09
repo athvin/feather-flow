@@ -1,0 +1,9 @@
+name: sa_unused_pass_all_consumed
+version: 1.0.0
+materialization: view
+dialect: duckdb
+database:
+  default:
+    type: duckdb
+    path: target/dev.duckdb
+    schema: analytics
