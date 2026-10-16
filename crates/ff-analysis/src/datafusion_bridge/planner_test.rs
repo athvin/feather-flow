@@ -179,3 +179,72 @@ fn test_empty_sql_error() {
     let result = sql_to_plan("", &provider);
     assert!(result.is_err());
 }
+
+// ── Store-qualified resolution + pre-parsed planning (er-entity integration) ──
+
+/// A catalog keyed by a store-qualified relation name, as a two-store caller
+/// (DuckLake `lake.main.*`, Postgres `public.*`) builds it.
+fn make_store_qualified_catalog() -> SchemaCatalog {
+    let mut catalog: SchemaCatalog = HashMap::new();
+    catalog.insert(
+        "lake.main.golden_records".to_string(),
+        Arc::new(RelSchema::new(vec![
+            TypedColumn {
+                name: "entity_id".to_string(),
+                source_table: None,
+                sql_type: SqlType::String { max_length: None },
+                nullability: Nullability::NotNull,
+                provenance: vec![],
+            },
+            TypedColumn {
+                name: "given_name".to_string(),
+                source_table: None,
+                sql_type: SqlType::String { max_length: None },
+                nullability: Nullability::Nullable,
+                provenance: vec![],
+            },
+        ])),
+    );
+    catalog
+}
+
+#[test]
+fn test_store_qualified_table_resolution() {
+    let catalog = make_store_qualified_catalog();
+    let registry = FunctionRegistry::new();
+    let provider = FeatherFlowProvider::new(&catalog, &registry);
+    // A fully-qualified `catalog.schema.table` reference resolves against the
+    // store-qualified catalog key `lake.main.golden_records`.
+    let plan = sql_to_plan(
+        "SELECT entity_id, given_name FROM lake.main.golden_records",
+        &provider,
+    )
+    .unwrap();
+    assert_eq!(plan.schema().fields().len(), 2);
+}
+
+#[test]
+fn test_bare_name_still_resolves() {
+    // The existing single-namespace catalog (bare model names) is unaffected.
+    let plan = plan_sql("SELECT id FROM orders").unwrap();
+    assert_eq!(plan.schema().fields().len(), 1);
+}
+
+#[test]
+fn test_plan_statement_from_pre_parsed_ast() {
+    use crate::sqlparser::dialect::DuckDbDialect;
+    use crate::sqlparser::parser::Parser;
+
+    let catalog = make_store_qualified_catalog();
+    let registry = FunctionRegistry::new();
+    let provider = FeatherFlowProvider::new(&catalog, &registry);
+
+    // Parse to an AST ourselves (as a rewrite step would), then plan the
+    // already-parsed statement through the new entry point.
+    let dialect = DuckDbDialect {};
+    let mut statements =
+        Parser::parse_sql(&dialect, "SELECT entity_id FROM lake.main.golden_records").unwrap();
+    let stmt = statements.remove(0);
+    let plan = plan_statement(stmt, &provider).unwrap();
+    assert_eq!(plan.schema().fields().len(), 1);
+}

@@ -217,6 +217,23 @@ impl<'a> FeatherFlowProvider<'a> {
         self.arrow_schemas.insert(name, arrow);
     }
 
+    /// Candidate catalog keys for a table reference, most-qualified first:
+    /// `catalog.schema.table`, `schema.table`, then the bare `table`. A
+    /// store-qualified catalog matches on the first form; a bare-name catalog
+    /// matches on the last, so both namings resolve through one path.
+    fn lookup_candidates(name: &TableReference) -> Vec<String> {
+        let table = name.table();
+        let mut candidates = Vec::with_capacity(3);
+        if let (Some(catalog), Some(schema)) = (name.catalog(), name.schema()) {
+            candidates.push(format!("{catalog}.{schema}.{table}"));
+        }
+        if let Some(schema) = name.schema() {
+            candidates.push(format!("{schema}.{table}"));
+        }
+        candidates.push(table.to_string());
+        candidates
+    }
+
     /// Convert a RelSchema to an Arrow SchemaRef
     fn rel_schema_to_arrow(schema: &RelSchema) -> SchemaRef {
         let fields: Vec<Field> = schema
@@ -249,19 +266,25 @@ impl TableSource for LogicalTableSource {
 
 impl ContextProvider for FeatherFlowProvider<'_> {
     fn get_table_source(&self, name: TableReference) -> DFResult<Arc<dyn TableSource>> {
+        // Resolve from most-qualified to least: a store-qualified catalog (keyed
+        // by e.g. `lake.main.golden_records` or `public.jobs`) matches on the full
+        // `catalog.schema.table`, while a single-namespace catalog keyed by bare
+        // model names still matches on `table` alone. Each candidate is tried
+        // case-sensitively, then case-insensitively.
+        for candidate in Self::lookup_candidates(&name) {
+            if let Some(arrow_schema) = self.arrow_schemas.get(&candidate) {
+                return Ok(Arc::new(LogicalTableSource {
+                    schema: Arc::clone(arrow_schema),
+                }));
+            }
+            if let Some(arrow_schema) = self.lowercase_schemas.get(&candidate.to_lowercase()) {
+                return Ok(Arc::new(LogicalTableSource {
+                    schema: Arc::clone(arrow_schema),
+                }));
+            }
+        }
+
         let table_name = name.table();
-        if let Some(arrow_schema) = self.arrow_schemas.get(table_name) {
-            return Ok(Arc::new(LogicalTableSource {
-                schema: Arc::clone(arrow_schema),
-            }));
-        }
-
-        if let Some(arrow_schema) = self.lowercase_schemas.get(&table_name.to_lowercase()) {
-            return Ok(Arc::new(LogicalTableSource {
-                schema: Arc::clone(arrow_schema),
-            }));
-        }
-
         plan_err!("Table not found: {table_name}")
     }
 

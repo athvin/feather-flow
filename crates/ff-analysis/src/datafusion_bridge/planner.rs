@@ -40,6 +40,26 @@ pub fn sql_to_plan(sql: &str, provider: &FeatherFlowProvider) -> AnalysisResult<
     Ok(plan)
 }
 
+/// Plan an already-parsed sqlparser statement into a DataFusion LogicalPlan.
+///
+/// This is the entry point for callers that parse and rewrite the AST themselves
+/// (for example, stripping a DuckLake `AT (VERSION => ...)` clause or a Postgres
+/// `RETURNING`/`ON CONFLICT` clause before planning). The statement must be the
+/// sqlparser version DataFusion bundles (0.59), reachable as
+/// [`datafusion_expr::sqlparser::ast::Statement`] and re-exported from this crate
+/// as `ff_analysis::sqlparser::ast::Statement`, not the standalone `sqlparser`
+/// crate a caller might also depend on. No dialect is needed: the statement is
+/// already parsed, so dialect selection (DuckDb vs PostgreSql) happened in the
+/// caller's parser.
+pub fn plan_statement(
+    statement: datafusion_expr::sqlparser::ast::Statement,
+    provider: &FeatherFlowProvider,
+) -> AnalysisResult<LogicalPlan> {
+    SqlToRel::new(provider)
+        .sql_statement_to_plan(statement)
+        .map_err(|e| AnalysisError::PlanningError(e.to_string()))
+}
+
 #[cfg(test)]
 #[path = "planner_test.rs"]
 mod tests;
