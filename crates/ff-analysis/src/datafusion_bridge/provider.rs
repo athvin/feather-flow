@@ -30,6 +30,7 @@ use crate::types::Nullability;
 struct DuckDbExprPlanner {
     map: Arc<ScalarUDF>,
     field: Arc<ScalarUDF>,
+    array: Arc<ScalarUDF>,
 }
 
 impl DuckDbExprPlanner {
@@ -37,6 +38,7 @@ impl DuckDbExprPlanner {
         Self {
             map: functions::variadic_text_stub("__ff_map"),
             field: functions::variadic_text_stub("__ff_field_access"),
+            array: functions::variadic_list_stub("__ff_array"),
         }
     }
 }
@@ -44,6 +46,14 @@ impl DuckDbExprPlanner {
 impl ExprPlanner for DuckDbExprPlanner {
     fn plan_make_map(&self, args: Vec<Expr>) -> DFResult<PlannerResult<Vec<Expr>>> {
         Ok(PlannerResult::Planned(self.map.call(args)))
+    }
+
+    fn plan_array_literal(
+        &self,
+        exprs: Vec<Expr>,
+        _schema: &DFSchema,
+    ) -> DFResult<PlannerResult<Vec<Expr>>> {
+        Ok(PlannerResult::Planned(self.array.call(exprs)))
     }
 
     fn plan_dictionary_literal(

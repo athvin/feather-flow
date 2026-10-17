@@ -106,16 +106,11 @@ pub(crate) fn duckdb_scalar_udfs() -> Vec<Arc<ScalarUDF>> {
             vec![DataType::Utf8, DataType::Utf8],
             DataType::Boolean,
         ),
-        make_scalar(
-            "regexp_replace",
-            vec![DataType::Utf8, DataType::Utf8, DataType::Utf8],
-            DataType::Utf8,
-        ),
-        make_scalar(
-            "regexp_extract",
-            vec![DataType::Utf8, DataType::Utf8],
-            DataType::Utf8,
-        ),
+        // Variadic: DuckDB's regexp_replace takes an optional flags argument
+        // (the standardize macros pass 'g').
+        make_variadic_scalar("regexp_replace", DataType::Utf8),
+        // Variadic: DuckDB's regexp_extract takes an optional group index.
+        make_variadic_scalar("regexp_extract", DataType::Utf8),
         make_type_preserving_variadic_scalar("coalesce"),
         make_type_preserving_variadic_scalar("ifnull"),
         make_type_preserving_variadic_scalar("nullif"),
@@ -125,6 +120,26 @@ pub(crate) fn duckdb_scalar_udfs() -> Vec<Arc<ScalarUDF>> {
         make_variadic_scalar("to_json", DataType::Utf8),
         make_variadic_scalar("map_from_entries", DataType::Utf8),
         make_variadic_scalar("json_keys", DataType::Utf8),
+        // The standardization stage SQL (stg/int_std assembly, er-entity-v0.1.3):
+        // JSON payload accessors, list shaping (the source_metadata lambdas are
+        // rewritten to lambda-free forms by the analyser before planning),
+        // unicode normalizers, and the date/regex validators. Loose variadic
+        // signatures — the stage passes check names/shape, the oracle types.
+        make_variadic_scalar("json_extract_string", DataType::Utf8),
+        make_variadic_scalar("json_extract", DataType::Utf8),
+        make_variadic_scalar("list_contains", DataType::Boolean),
+        make_variadic_scalar("list_distinct", list_of_utf8()),
+        make_variadic_scalar("list_sort", list_of_utf8()),
+        make_variadic_scalar("list_filter", list_of_utf8()),
+        make_variadic_scalar("list_transform", list_of_utf8()),
+        make_variadic_scalar("list_prepend", list_of_utf8()),
+        make_variadic_scalar("nfc_normalize", DataType::Utf8),
+        make_variadic_scalar("strip_accents", DataType::Utf8),
+        make_variadic_scalar("regexp_full_match", DataType::Boolean),
+        make_variadic_scalar(
+            "try_strptime",
+            DataType::Timestamp(arrow::datatypes::TimeUnit::Microsecond, None),
+        ),
         make_variadic_scalar("array_length", DataType::Int64),
         make_scalar(
             "now",
@@ -315,6 +330,17 @@ fn make_window(name: &str, ret: Option<DataType>) -> Arc<WindowUDF> {
 }
 
 /// Create a scalar UDF with exact signature
+
+/// `LIST(VARCHAR)` — the list type the standardization stage's list-shaping
+/// stubs return, so CASE arms against `cast([] as varchar[])` coerce.
+fn list_of_utf8() -> DataType {
+    DataType::List(std::sync::Arc::new(arrow::datatypes::Field::new(
+        "item",
+        DataType::Utf8,
+        true,
+    )))
+}
+
 fn make_scalar(name: &str, args: Vec<DataType>, ret: DataType) -> Arc<ScalarUDF> {
     Arc::new(ScalarUDF::from(StubScalarUDF {
         name: name.to_string(),
@@ -355,6 +381,23 @@ fn make_variadic_scalar(name: &str, ret: DataType) -> Arc<ScalarUDF> {
 /// column references are still resolved, and the result types as text.
 pub(crate) fn variadic_text_stub(name: &str) -> Arc<ScalarUDF> {
     make_variadic_scalar(name, DataType::Utf8)
+}
+
+/// A variadic LIST(VARCHAR)-returning scalar stub, for the custom `ExprPlanner`
+/// to wrap DuckDB array literals (`['a', 'b']`, `[]`): the element expressions
+/// are preserved so their column references resolve, and the result carries a
+/// list type so casts (`[]::varchar[]`) and list functions coerce.
+pub(crate) fn variadic_list_stub(name: &str) -> Arc<ScalarUDF> {
+    Arc::new(ScalarUDF::from(StubScalarUDF {
+        name: name.to_string(),
+        // Zero args allowed: the empty array literal `[]` (always cast at the
+        // use site, e.g. `[]::varchar[]`) plans through this stub too.
+        signature: Signature::one_of(
+            vec![TypeSignature::Nullary, TypeSignature::VariadicAny],
+            Volatility::Immutable,
+        ),
+        return_type: list_of_utf8(),
+    }))
 }
 
 /// Create a type-preserving variadic scalar UDF (returns first non-Null arg type)
