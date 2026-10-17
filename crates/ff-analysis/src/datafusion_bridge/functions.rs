@@ -118,6 +118,17 @@ pub(crate) fn duckdb_scalar_udfs() -> Vec<Arc<ScalarUDF>> {
         make_type_preserving_variadic_scalar("ifnull"),
         make_type_preserving_variadic_scalar("nullif"),
         make_variadic_scalar("struct_pack", DataType::Utf8),
+        // JSON / list constructors + accessors the entity-resolution engine's
+        // stage SQL uses (golden-mart assembly): all polymorphic, so variadic_any.
+        make_variadic_scalar("to_json", DataType::Utf8),
+        make_variadic_scalar("map_from_entries", DataType::Utf8),
+        make_variadic_scalar("json_keys", DataType::Utf8),
+        make_variadic_scalar("array_length", DataType::Int64),
+        make_scalar(
+            "now",
+            vec![],
+            DataType::Timestamp(arrow::datatypes::TimeUnit::Microsecond, None),
+        ),
         make_scalar(
             "struct_extract",
             vec![DataType::Utf8, DataType::Utf8],
@@ -237,6 +248,9 @@ pub(crate) fn duckdb_aggregate_udfs() -> Vec<Arc<AggregateUDF>> {
         make_aggregate("string_agg", DataType::Utf8, DataType::Utf8),
         make_aggregate("group_concat", DataType::Utf8, DataType::Utf8),
         make_aggregate("list_agg", DataType::Utf8, DataType::Utf8),
+        // DuckDB's `list(expr [ORDER BY ...])` aggregate (alias of list_agg/array_agg)
+        // — used by the golden-mart metadata assembly.
+        make_aggregate("list", DataType::Utf8, DataType::Utf8),
         make_aggregate("array_agg", DataType::Utf8, DataType::Utf8),
         make_aggregate("bool_and", DataType::Boolean, DataType::Boolean),
         make_aggregate("bool_or", DataType::Boolean, DataType::Boolean),
