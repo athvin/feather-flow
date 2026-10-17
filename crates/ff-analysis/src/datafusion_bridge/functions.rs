@@ -6,13 +6,15 @@
 
 use std::sync::Arc;
 
-use arrow::datatypes::DataType;
+use arrow::datatypes::{DataType, Field, FieldRef};
 use datafusion_common::{DataFusionError, Result as DFResult};
 use datafusion_expr::function::AccumulatorArgs;
 use datafusion_expr::{
-    Accumulator, AggregateUDF, ColumnarValue, ScalarUDF, ScalarUDFImpl, Signature, TypeSignature,
-    Volatility,
+    Accumulator, AggregateUDF, ColumnarValue, PartitionEvaluator, ScalarUDF, ScalarUDFImpl,
+    Signature, TypeSignature, Volatility, WindowUDF, WindowUDFImpl,
 };
+use datafusion_functions_window_common::field::WindowUDFFieldArgs;
+use datafusion_functions_window_common::partition::PartitionEvaluatorArgs;
 
 /// Register all DuckDB scalar UDFs
 pub(crate) fn duckdb_scalar_udfs() -> Vec<Arc<ScalarUDF>> {
@@ -129,6 +131,11 @@ pub(crate) fn duckdb_scalar_udfs() -> Vec<Arc<ScalarUDF>> {
             vec![],
             DataType::Timestamp(arrow::datatypes::TimeUnit::Microsecond, None),
         ),
+        make_variadic_scalar("concat", DataType::Utf8),
+        make_variadic_scalar("concat_ws", DataType::Utf8),
+        // Map/list element access, e.g. `element_at(m, key)` — the analyser's
+        // target when rewriting DuckDB `m[key].field` subscript-field access.
+        make_variadic_scalar("element_at", DataType::Utf8),
         make_scalar(
             "struct_extract",
             vec![DataType::Utf8, DataType::Utf8],
@@ -265,6 +272,48 @@ pub(crate) fn duckdb_aggregate_udfs() -> Vec<Arc<AggregateUDF>> {
     ]
 }
 
+/// Register all DuckDB / SQL-standard window UDFs.
+///
+/// DataFusion's planning-only context provides no built-in window functions
+/// (they live in `datafusion-functions-window`, which this crate does not link),
+/// so the ranking and navigation window functions are registered here as stubs.
+/// Ranking functions (`row_number`, `rank`, …) type as `BIGINT`; navigation
+/// functions (`lag`, `lead`, `first_value`, …) preserve their first argument's
+/// type. Like the scalar/aggregate stubs, they are never executed.
+pub(crate) fn duckdb_window_udfs() -> Vec<Arc<WindowUDF>> {
+    vec![
+        make_window("row_number", Some(DataType::Int64)),
+        make_window("rank", Some(DataType::Int64)),
+        make_window("dense_rank", Some(DataType::Int64)),
+        make_window("ntile", Some(DataType::Int64)),
+        make_window("percent_rank", Some(DataType::Float64)),
+        make_window("cume_dist", Some(DataType::Float64)),
+        // Navigation functions return a value drawn from their first argument.
+        make_window("lag", None),
+        make_window("lead", None),
+        make_window("first_value", None),
+        make_window("last_value", None),
+        make_window("nth_value", None),
+    ]
+}
+
+/// Create a window UDF stub. `ret == Some(dt)` fixes the output type (ranking
+/// functions); `ret == None` makes it type-preserving over the first argument
+/// (navigation functions like `lag`/`first_value`).
+fn make_window(name: &str, ret: Option<DataType>) -> Arc<WindowUDF> {
+    // Accept both zero arguments (ranking functions: `row_number()`) and any
+    // positional arguments (navigation functions: `lag(col, 1)`, `ntile(4)`).
+    let signature = Signature::new(
+        TypeSignature::OneOf(vec![TypeSignature::Nullary, TypeSignature::VariadicAny]),
+        Volatility::Immutable,
+    );
+    Arc::new(WindowUDF::from(StubWindowUDF {
+        name: name.to_string(),
+        signature,
+        return_type: ret,
+    }))
+}
+
 /// Create a scalar UDF with exact signature
 fn make_scalar(name: &str, args: Vec<DataType>, ret: DataType) -> Arc<ScalarUDF> {
     Arc::new(ScalarUDF::from(StubScalarUDF {
@@ -298,6 +347,14 @@ fn make_variadic_scalar(name: &str, ret: DataType) -> Arc<ScalarUDF> {
         signature: Signature::variadic_any(Volatility::Immutable),
         return_type: ret,
     }))
+}
+
+/// A variadic text-returning scalar stub, for the custom `ExprPlanner` to wrap
+/// constructs DataFusion has no builder for (DuckDB `MAP {..}` literals, map/struct
+/// subscript field access): the wrapped argument expressions are preserved so their
+/// column references are still resolved, and the result types as text.
+pub(crate) fn variadic_text_stub(name: &str) -> Arc<ScalarUDF> {
+    make_variadic_scalar(name, DataType::Utf8)
 }
 
 /// Create a type-preserving variadic scalar UDF (returns first non-Null arg type)
@@ -496,5 +553,54 @@ impl datafusion_expr::AggregateUDFImpl for TypePreservingAggregateUDF {
             "Type-preserving stub aggregate UDF '{}' should not be executed during static analysis",
             self.name
         )))
+    }
+}
+
+/// A no-op window UDF stub that provides type information for DataFusion planning.
+///
+/// These stubs are never executed; they exist solely so that DataFusion's
+/// `SqlToRel` planner can resolve window functions (`row_number()`, `rank()`,
+/// `lag()`, …) and infer their output type during static analysis.
+#[derive(Debug, Hash, PartialEq, Eq)]
+struct StubWindowUDF {
+    name: String,
+    signature: Signature,
+    /// `Some(dt)` for a fixed output type (ranking functions); `None` to preserve
+    /// the first argument's type (navigation functions).
+    return_type: Option<DataType>,
+}
+
+impl WindowUDFImpl for StubWindowUDF {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn signature(&self) -> &Signature {
+        &self.signature
+    }
+
+    fn partition_evaluator(
+        &self,
+        _args: PartitionEvaluatorArgs,
+    ) -> DFResult<Box<dyn PartitionEvaluator>> {
+        Err(DataFusionError::Internal(format!(
+            "Stub window UDF '{}' should not be executed during static analysis",
+            self.name
+        )))
+    }
+
+    fn field(&self, field_args: WindowUDFFieldArgs) -> DFResult<FieldRef> {
+        let data_type = match &self.return_type {
+            Some(dt) => dt.clone(),
+            None => field_args
+                .get_input_field(0)
+                .map(|f| f.data_type().clone())
+                .unwrap_or(DataType::Int64),
+        };
+        Ok(Arc::new(Field::new(field_args.name(), data_type, true)))
     }
 }

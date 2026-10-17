@@ -31,6 +31,7 @@ sqlparser = { version = "0.61", features = ["visitor"] }
 datafusion-common = "52"
 datafusion-expr = "52"
 datafusion-sql = "52"
+datafusion-functions-window-common = "52"
 arrow = { version = "57", default-features = false }
 
 # Database

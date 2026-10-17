@@ -21,6 +21,7 @@ sqlparser.workspace = true
 datafusion-common.workspace = true
 datafusion-expr.workspace = true
 datafusion-sql.workspace = true
+datafusion-functions-window-common.workspace = true
 arrow.workspace = true
 
 [dev-dependencies]

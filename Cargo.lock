@@ -1251,6 +1251,7 @@ dependencies = [
  "arrow 57.3.0",
  "datafusion-common",
  "datafusion-expr",
+ "datafusion-functions-window-common",
  "datafusion-sql",
  "ff-analysis",
  "ff-core",

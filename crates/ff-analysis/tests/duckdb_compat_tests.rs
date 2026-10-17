@@ -248,6 +248,90 @@ fn test_stub_agg_mode() {
     assert!(result.is_ok(), "mode: {:?}", result);
 }
 
+// ── Function Stub Tests — Window ────────────────────────────────────────
+
+#[test]
+fn test_stub_window_row_number() {
+    let catalog = standard_catalog();
+    let result = plan_with_catalog(
+        "SELECT row_number() OVER (PARTITION BY customer_id ORDER BY created_at) FROM orders",
+        &catalog,
+    );
+    assert!(result.is_ok(), "row_number() window stub: {:?}", result);
+}
+
+#[test]
+fn test_stub_window_rank_dense_rank() {
+    let catalog = standard_catalog();
+    let result = plan_with_catalog(
+        "SELECT rank() OVER (ORDER BY amount), dense_rank() OVER (ORDER BY amount) FROM orders",
+        &catalog,
+    );
+    assert!(result.is_ok(), "rank/dense_rank window stubs: {:?}", result);
+}
+
+#[test]
+fn test_stub_window_lag_preserves_type() {
+    let catalog = standard_catalog();
+    let result = plan_with_catalog(
+        "SELECT lag(amount, 1) OVER (ORDER BY created_at) FROM orders",
+        &catalog,
+    );
+    assert!(result.is_ok(), "lag() navigation window stub: {:?}", result);
+}
+
+// ── Function Stub Tests — concat / element access / MAP ──────────────────
+
+#[test]
+fn test_stub_concat_ws() {
+    let catalog = standard_catalog();
+    let result = plan_with_catalog(
+        "SELECT concat_ws('-', status, name) FROM orders, customers",
+        &catalog,
+    );
+    assert!(result.is_ok(), "concat_ws stub: {:?}", result);
+}
+
+#[test]
+fn test_stub_element_at() {
+    let catalog = standard_catalog();
+    let result = plan_with_catalog(
+        "SELECT element_at(status, name) FROM orders, customers",
+        &catalog,
+    );
+    assert!(result.is_ok(), "element_at stub: {:?}", result);
+}
+
+#[test]
+fn test_map_literal_and_subscript_plan() {
+    let catalog = standard_catalog();
+    // A DuckDB MAP literal built from a column value, read back by subscript —
+    // both handled by the custom ExprPlanner, with the inner column reference
+    // (`status`) still resolved against the schema.
+    let result = plan_with_catalog("SELECT (MAP {'k': status})['k'] FROM orders", &catalog);
+    assert!(
+        result.is_ok(),
+        "MAP literal + subscript should plan: {:?}",
+        result
+    );
+}
+
+#[test]
+fn test_map_literal_rejects_unknown_inner_column() {
+    let catalog = standard_catalog();
+    // The ExprPlanner keeps the map's value expressions, so a bad column inside
+    // the literal is still a planning error — the construct is analysed, not erased.
+    let result = plan_with_catalog(
+        "SELECT (MAP {'k': no_such_column})['k'] FROM orders",
+        &catalog,
+    );
+    assert!(
+        result.is_err(),
+        "unknown column inside MAP must fail: {:?}",
+        result
+    );
+}
+
 // ── Unstubbed Function — Graceful Failure ───────────────────────────────
 
 #[test]

@@ -8,9 +8,9 @@ use std::sync::Arc;
 
 use arrow::datatypes::{Field, Schema, SchemaRef};
 use datafusion_common::config::ConfigOptions;
-use datafusion_common::{plan_err, Result as DFResult};
-use datafusion_expr::planner::ExprPlanner;
-use datafusion_expr::{AggregateUDF, Expr, ScalarUDF, TableSource, WindowUDF};
+use datafusion_common::{plan_err, DFSchema, Result as DFResult};
+use datafusion_expr::planner::{ExprPlanner, PlannerResult, RawDictionaryExpr, RawFieldAccessExpr};
+use datafusion_expr::{AggregateUDF, Expr, GetFieldAccess, ScalarUDF, TableSource, WindowUDF};
 use datafusion_sql::planner::ContextProvider;
 use datafusion_sql::TableReference;
 
@@ -18,6 +18,70 @@ use crate::datafusion_bridge::functions;
 use crate::datafusion_bridge::types::sql_type_to_arrow;
 use crate::schema::{RelSchema, SchemaCatalog};
 use crate::types::Nullability;
+
+/// A DataFusion [`ExprPlanner`] for the DuckDB-specific expression forms the engine's
+/// stage SQL uses that DataFusion has no builder for: `MAP { k: v, .. }` literals and
+/// map/struct subscript field access (`m[key].field`). Each is wrapped in a
+/// text-returning scalar stub that KEEPS its argument expressions — so the columns
+/// inside the map or the subscript are still resolved against the schema — while
+/// giving the construct a type the rest of the plan can carry. This lets the analyser
+/// plan, and therefore validate, stage SQL built around DuckDB maps.
+#[derive(Debug)]
+struct DuckDbExprPlanner {
+    map: Arc<ScalarUDF>,
+    field: Arc<ScalarUDF>,
+}
+
+impl DuckDbExprPlanner {
+    fn new() -> Self {
+        Self {
+            map: functions::variadic_text_stub("__ff_map"),
+            field: functions::variadic_text_stub("__ff_field_access"),
+        }
+    }
+}
+
+impl ExprPlanner for DuckDbExprPlanner {
+    fn plan_make_map(&self, args: Vec<Expr>) -> DFResult<PlannerResult<Vec<Expr>>> {
+        Ok(PlannerResult::Planned(self.map.call(args)))
+    }
+
+    fn plan_dictionary_literal(
+        &self,
+        expr: RawDictionaryExpr,
+        _schema: &DFSchema,
+    ) -> DFResult<PlannerResult<RawDictionaryExpr>> {
+        let mut args = Vec::with_capacity(expr.keys.len() + expr.values.len());
+        for (k, v) in expr.keys.into_iter().zip(expr.values) {
+            args.push(k);
+            args.push(v);
+        }
+        Ok(PlannerResult::Planned(self.map.call(args)))
+    }
+
+    fn plan_field_access(
+        &self,
+        expr: RawFieldAccessExpr,
+        _schema: &DFSchema,
+    ) -> DFResult<PlannerResult<RawFieldAccessExpr>> {
+        let mut args = vec![expr.expr];
+        match expr.field_access {
+            GetFieldAccess::ListIndex { key } => args.push(*key),
+            GetFieldAccess::ListRange {
+                start,
+                stop,
+                stride,
+            } => {
+                args.push(*start);
+                args.push(*stop);
+                args.push(*stride);
+            }
+            // A named struct field is a literal name — nothing to resolve.
+            GetFieldAccess::NamedStructField { .. } => {}
+        }
+        Ok(PlannerResult::Planned(self.field.call(args)))
+    }
+}
 
 /// Metadata for a user-defined scalar function stub to register in the DataFusion context.
 ///
@@ -108,6 +172,7 @@ impl UserTableFunctionStub {
 pub struct FunctionRegistry {
     scalar_functions: HashMap<String, Arc<ScalarUDF>>,
     aggregate_functions: HashMap<String, Arc<AggregateUDF>>,
+    window_functions: HashMap<String, Arc<WindowUDF>>,
     table_functions: HashMap<String, Arc<dyn TableSource>>,
 }
 
@@ -131,6 +196,10 @@ impl FunctionRegistry {
                 .into_iter()
                 .map(|f| (f.name().to_uppercase(), f))
                 .collect();
+        let window_functions: HashMap<String, Arc<WindowUDF>> = functions::duckdb_window_udfs()
+            .into_iter()
+            .map(|f| (f.name().to_uppercase(), f))
+            .collect();
 
         for uf in user_functions {
             let udf = functions::make_user_scalar_udf(uf.name(), uf.arg_types(), uf.return_type());
@@ -147,6 +216,7 @@ impl FunctionRegistry {
         Self {
             scalar_functions,
             aggregate_functions,
+            window_functions,
             table_functions,
         }
     }
@@ -184,6 +254,7 @@ pub struct FeatherFlowProvider<'a> {
     lowercase_schemas: HashMap<String, SchemaRef>,
     config: ConfigOptions,
     registry: &'a FunctionRegistry,
+    expr_planners: Vec<Arc<dyn ExprPlanner>>,
 }
 
 impl<'a> FeatherFlowProvider<'a> {
@@ -206,6 +277,7 @@ impl<'a> FeatherFlowProvider<'a> {
             lowercase_schemas,
             config: ConfigOptions::default(),
             registry,
+            expr_planners: vec![Arc::new(DuckDbExprPlanner::new())],
         }
     }
 
@@ -313,8 +385,11 @@ impl ContextProvider for FeatherFlowProvider<'_> {
             .cloned()
     }
 
-    fn get_window_meta(&self, _name: &str) -> Option<Arc<WindowUDF>> {
-        None
+    fn get_window_meta(&self, name: &str) -> Option<Arc<WindowUDF>> {
+        self.registry
+            .window_functions
+            .get(&name.to_uppercase())
+            .cloned()
     }
 
     fn get_variable_type(&self, _variable_names: &[String]) -> Option<arrow::datatypes::DataType> {
@@ -334,11 +409,11 @@ impl ContextProvider for FeatherFlowProvider<'_> {
     }
 
     fn udwf_names(&self) -> Vec<String> {
-        vec![]
+        self.registry.window_functions.keys().cloned().collect()
     }
 
     fn get_expr_planners(&self) -> &[Arc<dyn ExprPlanner>] {
-        &[]
+        &self.expr_planners
     }
 }
 
