@@ -170,6 +170,7 @@ pub(crate) fn duckdb_scalar_udfs() -> Vec<Arc<ScalarUDF>> {
         ),
         make_scalar("hash", vec![DataType::Utf8], DataType::Int64),
         make_scalar("md5", vec![DataType::Utf8], DataType::Utf8),
+        make_scalar("sha256", vec![DataType::Utf8], DataType::Utf8),
         make_scalar(
             "format",
             vec![DataType::Utf8, DataType::Utf8],
