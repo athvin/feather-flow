@@ -332,8 +332,6 @@ fn make_window(name: &str, ret: Option<DataType>) -> Arc<WindowUDF> {
     }))
 }
 
-/// Create a scalar UDF with exact signature
-
 /// `LIST(VARCHAR)` — the list type the standardization stage's list-shaping
 /// stubs return, so CASE arms against `cast([] as varchar[])` coerce.
 fn list_of_utf8() -> DataType {
@@ -344,6 +342,7 @@ fn list_of_utf8() -> DataType {
     )))
 }
 
+/// Create a scalar UDF with exact signature.
 fn make_scalar(name: &str, args: Vec<DataType>, ret: DataType) -> Arc<ScalarUDF> {
     Arc::new(ScalarUDF::from(StubScalarUDF {
         name: name.to_string(),
