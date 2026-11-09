@@ -132,6 +132,8 @@ pub(crate) fn duckdb_scalar_udfs() -> Vec<Arc<ScalarUDF>> {
         make_variadic_scalar("list_sort", list_of_utf8()),
         make_variadic_scalar("list_filter", list_of_utf8()),
         make_variadic_scalar("list_transform", list_of_utf8()),
+        // Rejoin transformed tokens in named replacement dictionaries.
+        make_variadic_scalar("array_to_string", DataType::Utf8),
         make_variadic_scalar("list_prepend", list_of_utf8()),
         make_variadic_scalar("nfc_normalize", DataType::Utf8),
         make_variadic_scalar("strip_accents", DataType::Utf8),
