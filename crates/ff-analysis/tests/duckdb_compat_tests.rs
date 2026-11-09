@@ -567,3 +567,18 @@ fn test_propagation_with_duckdb_function() {
         result.failures
     );
 }
+
+#[test]
+fn test_stub_array_to_string_preserves_input_column_validation() {
+    let catalog = standard_catalog();
+    let result = plan_with_catalog(
+        "SELECT array_to_string(list_transform(string_split(status, ' ')), ' ') AS replaced FROM orders",
+        &catalog,
+    );
+    assert!(result.is_ok(), "array_to_string stub: {result:?}");
+    let missing = plan_with_catalog(
+        "SELECT array_to_string(string_split(missing_column, ' '), ' ') FROM orders",
+        &catalog,
+    );
+    assert!(missing.is_err(), "input columns must still resolve");
+}
